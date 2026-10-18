@@ -3,159 +3,143 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>3D 工厂编辑器 · Factory Builder</title>
-  <style>
-    :root {
-      --bg: #0e1116;
-      --panel: #171c24;
-      --panel-2: #1f2630;
-      --border: #2a3340;
-      --text: #e6edf3;
-      --muted: #8b98a9;
-      --accent: #4f9dff;
-      --accent-2: #2b7de0;
-      --danger: #ff5c5c;
-      --ok: #3ad29f;
-    }
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0; height: 100%; overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      background: var(--bg); color: var(--text);
-      user-select: none;
-    }
-    #app { display: flex; height: 100vh; width: 100vw; }
-
-    /* ---- 左侧：组件库 ---- */
-    #sidebar {
-      width: 220px; flex-shrink: 0; background: var(--panel);
-      border-right: 1px solid var(--border);
-      display: flex; flex-direction: column;
-    }
-    .side-head {
-      padding: 14px 16px; font-size: 15px; font-weight: 700;
-      letter-spacing: .5px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 8px;
-    }
-    .side-head .logo { color: var(--accent); }
-    .lib { padding: 10px; overflow-y: auto; flex: 1; }
-    .lib-title { font-size: 11px; color: var(--muted); text-transform: uppercase; margin: 10px 6px 6px; letter-spacing: 1px; }
-    .lib-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .item {
-      background: var(--panel-2); border: 1px solid var(--border);
-      border-radius: 10px; padding: 10px 6px; text-align: center;
-      cursor: pointer; transition: .15s; font-size: 12px;
-    }
-    .item:hover { border-color: var(--accent); transform: translateY(-2px); background: #232c38; }
-    .item .ico { font-size: 22px; display: block; margin-bottom: 4px; }
-
-    /* ---- 中间：画布 ---- */
-    #stage { flex: 1; position: relative; }
-    #canvas { display: block; width: 100%; height: 100%; }
-    #hint {
-      position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
-      background: rgba(0,0,0,.55); padding: 6px 14px; border-radius: 20px;
-      font-size: 12px; color: var(--muted); pointer-events: none; white-space: nowrap;
-    }
-    #toolbar {
-      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-      display: flex; gap: 6px; background: rgba(23,28,36,.9);
-      padding: 6px; border-radius: 12px; border: 1px solid var(--border);
-      backdrop-filter: blur(6px);
-    }
-    .tbtn {
-      background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-      padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: .12s;
-    }
-    .tbtn:hover { border-color: var(--accent); }
-    .tbtn.active { background: var(--accent-2); border-color: var(--accent); color: #fff; }
-    .tbtn.danger:hover { border-color: var(--danger); color: var(--danger); }
-
-    /* ---- 右侧：属性 ---- */
-    #inspector {
-      width: 260px; flex-shrink: 0; background: var(--panel);
-      border-left: 1px solid var(--border); display: flex; flex-direction: column;
-    }
-    .insp-head { padding: 14px 16px; font-weight: 700; border-bottom: 1px solid var(--border); }
-    .insp-body { padding: 14px; overflow-y: auto; flex: 1; }
-    .empty-state { color: var(--muted); font-size: 13px; text-align: center; margin-top: 40px; line-height: 1.6; }
-    .field { margin-bottom: 14px; }
-    .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; }
-    .row { display: flex; gap: 6px; }
-    .row input { flex: 1; min-width: 0; }
-    input[type="number"], input[type="text"] {
-      width: 100%; background: var(--panel-2); border: 1px solid var(--border);
-      color: var(--text); border-radius: 7px; padding: 7px 8px; font-size: 13px;
-    }
-    input[type="number"]:focus, input[type="text"]:focus { outline: none; border-color: var(--accent); }
-    input[type="color"] { width: 100%; height: 36px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; cursor: pointer; padding: 3px; }
-    input[type="range"] { width: 100%; }
-    .axis { font-size: 10px; color: var(--muted); text-align: center; margin-top: 2px; }
-    .btn {
-      width: 100%; padding: 9px; border-radius: 8px; border: none; cursor: pointer;
-      font-size: 13px; font-weight: 600; transition: .12s;
-    }
-    .btn.del { background: var(--danger); color: #fff; }
-    .btn.del:hover { filter: brightness(1.1); }
-    .btn.dup { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); margin-bottom: 8px; }
-    .btn.dup:hover { border-color: var(--accent); }
-
-    /* ---- 底栏 ---- */
-    #footer {
-      position: absolute; bottom: 0; left: 0; right: 0;
-      display: flex; gap: 8px; padding: 10px; justify-content: center;
-    }
-    #stats { position: absolute; top: 12px; left: 12px; font-size: 11px; color: var(--muted); background: rgba(0,0,0,.4); padding: 4px 10px; border-radius: 6px; }
-  </style>
+  <title>FactoryForge · 3D 工厂编辑器</title>
+  <link rel="stylesheet" href="./css/style.css" />
 </head>
 <body>
-  <div id="app">
-    <!-- 组件库 -->
-    <aside id="sidebar">
-      <div class="side-head"><span class="logo">⬢</span> 工厂编辑器</div>
-      <div class="lib" id="lib"></div>
-      <div style="padding:10px;border-top:1px solid var(--border);">
-        <button class="btn dup" id="btnImportGlb" style="width:100%;">⬆ 导入 .glb 模型</button>
-        <input type="file" id="glbInput" accept=".glb,.gltf" style="display:none" />
+  <!-- 顶部栏 -->
+  <header id="topbar">
+    <div class="brand"><span class="logo">⬢</span><b>FactoryForge</b><span class="sub">3D 工厂编辑器</span></div>
+    <div class="tb-group">
+      <button class="icon-btn" id="btnToggleLeft" title="显示/隐藏素材面板">◧</button>
+      <label class="scene-pick">场景
+        <select id="sceneSelect"></select>
+      </label>
+      <span class="scene-name" id="sceneName"></span>
+    </div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btnUndo" title="撤销 (Ctrl+Z)">↶ 撤销</button>
+      <button class="tb-btn" id="btnRedo" title="重做 (Ctrl+Y)">↷ 重做</button>
+      <span class="sep"></span>
+      <button class="tb-btn" id="btnSave" title="保存到浏览器 (Ctrl+S)">💾 保存</button>
+      <button class="tb-btn" id="btnLoad" title="从浏览器读取">📂 读取</button>
+      <button class="tb-btn" id="btnExport" title="导出 JSON 文件">⬇ 导出</button>
+      <button class="tb-btn" id="btnImport" title="导入 JSON 文件">⬆ 导入</button>
+      <button class="tb-btn" id="btnShot" title="导出截图 PNG">📷 截图</button>
+      <span class="sep"></span>
+      <button class="icon-btn" id="btnHelp" title="快捷键帮助 (?)">?</button>
+      <button class="icon-btn" id="btnToggleRight" title="显示/隐藏属性面板">◨</button>
+    </div>
+    <input type="file" id="fileInput" accept="application/json,.json" hidden />
+    <input type="file" id="glbInput" accept=".glb,.gltf" hidden />
+  </header>
+
+  <main id="main">
+    <!-- 左侧：素材库 / 场景大纲 -->
+    <aside id="left" class="panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="library">素材库</button>
+        <button class="tab" data-tab="outliner">场景大纲 <span class="badge" id="objCountBadge">0</span></button>
+      </div>
+      <div class="tab-body" id="tab-library">
+        <div class="search"><input type="search" id="libSearch" placeholder="搜索素材，如：起重机 / 船" /></div>
+        <div class="lib-scroll" id="lib"></div>
+        <div class="panel-foot">
+          <button class="wide-btn" id="btnImportGlb">⬆ 导入 .glb / .gltf 模型</button>
+          <div class="foot-tip">点击素材添加到视图中心，或直接拖拽到场景地面</div>
+        </div>
+      </div>
+      <div class="tab-body hidden" id="tab-outliner">
+        <div class="search"><input type="search" id="olSearch" placeholder="筛选物体名称" /></div>
+        <div class="ol-list" id="olList"></div>
       </div>
     </aside>
 
-    <!-- 3D 画布 -->
-    <section id="stage">
+    <!-- 中间：视口 -->
+    <section id="viewport">
       <canvas id="canvas"></canvas>
-      <div id="stats"></div>
-      <div id="toolbar">
-        <button class="tbtn active" data-mode="translate" title="移动 (W)">✛ 移动</button>
-        <button class="tbtn" data-mode="rotate" title="旋转 (E)">⟳ 旋转</button>
-        <button class="tbtn" data-mode="scale" title="缩放 (R)">⤢ 缩放</button>
-        <span style="width:1px;background:var(--border);margin:0 2px;"></span>
-        <button class="tbtn" id="btnGrid" title="网格吸附">⊞ 吸附</button>
-        <button class="tbtn" id="btnAnim" title="播放/暂停动画 (空格)">▶ 动画</button>
-        <button class="tbtn" id="btnView" title="切换俯视/透视 (V)">⬒ 俯视</button>
-        <span style="width:1px;background:var(--border);margin:0 2px;"></span>
-        <button class="tbtn" id="btnGroup" title="成组选中 (G)">⛓ 成组</button>
-        <button class="tbtn" id="btnUngroup" title="解组 (Shift+G)">⛓̸ 解组</button>
-        <button class="tbtn danger" id="btnClear" title="清空场景">🗑 清空</button>
+
+      <div class="float-bar" id="toolbar">
+        <button class="fb-btn active" data-mode="translate" title="移动 (W)">✛<span>移动</span></button>
+        <button class="fb-btn" data-mode="rotate" title="旋转 (E)">⟳<span>旋转</span></button>
+        <button class="fb-btn" data-mode="scale" title="缩放 (R)">⤢<span>缩放</span></button>
+        <i class="fb-sep"></i>
+        <button class="fb-btn" id="btnSpace" title="切换局部/世界坐标 (Q)">🌐<span>世界</span></button>
+        <button class="fb-btn" id="btnSnap" title="网格吸附 (S)">⊞<span>吸附</span></button>
+        <button class="fb-btn active" id="btnAnim" title="播放/暂停动画 (空格)">⏸<span>动画</span></button>
+        <i class="fb-sep"></i>
+        <button class="fb-btn" id="btnGroup" title="成组 (G)">⛓<span>成组</span></button>
+        <button class="fb-btn" id="btnUngroup" title="解组 (Shift+G)">✂<span>解组</span></button>
+        <button class="fb-btn danger" id="btnDelete" title="删除 (Delete)">🗑<span>删除</span></button>
       </div>
-      <div id="hint">拖拽旋转视角 · 滚轮缩放 · 点击选中 · Shift+点击多选 · 从左侧添加组件</div>
-      <div id="footer">
-        <button class="tbtn" id="btnSave">💾 保存</button>
-        <button class="tbtn" id="btnLoad">📂 加载</button>
-        <button class="tbtn" id="btnExport">⬇ 导出</button>
-        <button class="tbtn" id="btnImport">⬆ 导入</button>
-        <input type="file" id="fileInput" accept="application/json" style="display:none" />
+
+      <div class="view-bar" id="viewBar">
+        <button class="vb-btn active" data-view="persp" title="透视视图 (1)">透视</button>
+        <button class="vb-btn" data-view="top" title="俯视平面图 (2 / V)">俯视</button>
+        <button class="vb-btn" data-view="front" title="正视 (3)">正视</button>
+        <button class="vb-btn" data-view="side" title="侧视 (4)">侧视</button>
+        <button class="vb-btn" id="btnFocus" title="聚焦选中 / 全部 (F)">◎ 聚焦</button>
+      </div>
+
+      <div id="toasts"></div>
+      <div id="dropHint" class="hidden">松开鼠标放置素材</div>
+
+      <div id="loading">
+        <div class="spinner"></div>
+        <div>正在加载 3D 引擎…</div>
+        <div class="load-tip" id="loadTip"></div>
       </div>
     </section>
 
-    <!-- 属性面板 -->
-    <aside id="inspector">
-      <div class="insp-head">属性</div>
-      <div class="insp-body" id="inspBody">
-        <div class="empty-state">未选中物体<br/><br/>点击场景中的物体<br/>进行编辑</div>
-      </div>
+    <!-- 右侧：属性 -->
+    <aside id="right" class="panel">
+      <div class="panel-head" id="inspTitle">属性</div>
+      <div class="insp-body" id="inspBody"></div>
     </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="stObjects">物体 0</span>
+    <span id="stSelection">未选中</span>
+    <span id="stCursor">X 0.0 · Z 0.0</span>
+    <span class="grow"></span>
+    <span id="stHint">左键选择 · Shift 多选 · 右键平移 · 滚轮缩放</span>
+    <span id="stFps">-- FPS</span>
+  </footer>
+
+  <!-- 帮助 -->
+  <div id="helpModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">快捷键 <button class="icon-btn" id="btnHelpClose">✕</button></div>
+      <div class="keys">
+        <div><kbd>W</kbd><kbd>E</kbd><kbd>R</kbd> 移动 / 旋转 / 缩放</div>
+        <div><kbd>Q</kbd> 局部 / 世界坐标</div>
+        <div><kbd>S</kbd> 网格吸附</div>
+        <div><kbd>F</kbd> 聚焦选中物体</div>
+        <div><kbd>1</kbd>–<kbd>4</kbd> 透视 / 俯视 / 正视 / 侧视</div>
+        <div><kbd>V</kbd> 俯视平面图切换</div>
+        <div><kbd>Shift</kbd>+点击 多选</div>
+        <div><kbd>Ctrl</kbd>+<kbd>A</kbd> 全选</div>
+        <div><kbd>G</kbd> 成组 · <kbd>Shift</kbd>+<kbd>G</kbd> 解组</div>
+        <div><kbd>Ctrl</kbd>+<kbd>D</kbd> 复制</div>
+        <div><kbd>Delete</kbd> 删除</div>
+        <div><kbd>H</kbd> 隐藏 · <kbd>L</kbd> 锁定</div>
+        <div><kbd>方向键</kbd> 微移（Shift ×5）</div>
+        <div><kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销 · <kbd>Ctrl</kbd>+<kbd>Y</kbd> 重做</div>
+        <div><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存</div>
+        <div><kbd>空格</kbd> 播放 / 暂停动画</div>
+        <div><kbd>Esc</kbd> 取消选择</div>
+      </div>
+    </div>
   </div>
 
+  <script>
+    // CDN 加载失败提示
+    setTimeout(function () {
+      if (!window.__ffReady) document.getElementById('loadTip').textContent =
+        '加载时间较长：请确认网络可访问 cdn.jsdelivr.net，并通过 http 服务打开（不要直接双击 html 文件）。';
+    }, 8000);
+  </script>
   <script type="importmap">
   {
     "imports": {
@@ -164,7 +148,6 @@
     }
   }
   </script>
-
-  <script type="module" src="./factory.js"></script>
+  <script type="module" src="./js/main.js"></script>
 </body>
 </html>
