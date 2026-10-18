@@ -403,7 +403,7 @@ function pushHistory() {
   history.index = history.stack.length - 1;
   updateHistoryButtons();
 }
-let histTimer = 0;
+let histTimer: ReturnType<typeof setTimeout> | undefined;
 function pushHistorySoon() { clearTimeout(histTimer); histTimer = setTimeout(pushHistory, 400); }
 function restoreHistory(i: number): void {
   const s = history.stack[i];
