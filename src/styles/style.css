@@ -238,3 +238,56 @@ kbd { background: var(--panel-3); border: 1px solid var(--border); border-bottom
   .fb-btn span { display: none; }
   .fb-btn { min-width: 34px; }
 }
+
+/* ---------- v4：资产包筛选 ---------- */
+.lib-filter { display: flex; flex-direction: column; gap: 6px; }
+.pack-title {
+  display: flex; align-items: center; justify-content: space-between; margin: 12px 2px 4px; padding-bottom: 4px;
+  font-weight: 700; font-size: 12.5px; border-bottom: 1px solid var(--border);
+}
+.pack-title:first-child { margin-top: 0; }
+.pack-title .industry, .am-nav-item em { font-style: normal; font-weight: 400; font-size: 10.5px; color: var(--muted); background: var(--panel-3); border-radius: 8px; padding: 0 6px; }
+.tb-btn.primary, .act.primary { background: var(--accent-2); border-color: var(--accent); color: #fff; }
+.tb-btn.primary:hover:not(:disabled), .act.primary:hover { background: var(--accent); }
+.act-grid.one { grid-template-columns: 1fr; }
+select { cursor: pointer; }
+
+/* ---------- 资产管理器 ---------- */
+.am-card { width: min(1180px, 96vw); height: min(760px, 92vh); display: flex; flex-direction: column; }
+.am-head-actions { display: flex; gap: 8px; align-items: center; }
+.am-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 210px 1fr 320px; }
+.am-nav { border-right: 1px solid var(--border); padding: 10px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.am-nav-title { color: var(--muted); font-size: 11px; margin: 12px 8px 4px; letter-spacing: .5px; }
+.am-nav-item { display: flex; align-items: center; gap: 6px; background: none; border: none; border-radius: 7px; padding: 7px 8px; text-align: left; }
+.am-nav-item span { flex: 1; }
+.am-nav-item b { font-weight: 400; color: var(--muted); font-size: 11.5px; }
+.am-nav-item:hover { background: var(--panel-2); }
+.am-nav-item.active { background: rgba(79,157,255,.18); }
+.am-nav-tip { margin-top: auto; padding: 10px 8px 2px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.am-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.am-toolbar { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.am-toolbar input { max-width: 340px; }
+.am-count { color: var(--muted); font-size: 12px; }
+.am-grid { flex: 1; overflow-y: auto; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; align-content: start; }
+.am-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; cursor: pointer; transition: .12s; }
+.am-item:hover { border-color: var(--accent); }
+.am-item.sel { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,157,255,.35); }
+.am-item-name { padding: 6px 8px 0; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.am-item-sub { padding: 0 8px 7px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.am-empty { grid-column: 1 / -1; color: var(--muted); text-align: center; padding: 60px 10px; line-height: 1.6; }
+.am-detail { border-left: 1px solid var(--border); padding: 12px; overflow-y: auto; }
+.am-preview { aspect-ratio: 4 / 3; border-radius: 10px; background: radial-gradient(circle at 50% 40%, #2a3644, #18202a); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.am-preview img { width: 100%; height: 100%; object-fit: contain; }
+.am-preview img[src=""] { display: none; }
+.am-title { font-weight: 700; font-size: 14px; margin: 10px 0 2px; }
+.am-id { color: var(--muted); font-size: 11px; font-family: monospace; word-break: break-all; margin-bottom: 10px; }
+.am-dl { display: grid; grid-template-columns: 76px 1fr; gap: 5px 8px; font-size: 12px; margin: 0 0 12px; }
+.am-dl dt { color: var(--muted); }
+.am-dl dd { margin: 0; word-break: break-all; }
+.am-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.am-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+.am-form label input, .am-form label select { color: var(--text); font-size: 12.5px; }
+.am-note { color: var(--muted); font-size: 11.5px; margin-top: 10px; line-height: 1.5; }
+.am-warn { background: rgba(255,180,84,.12); border: 1px solid rgba(255,180,84,.4); color: var(--warn); border-radius: 8px; padding: 7px 9px; font-size: 12px; margin-bottom: 10px; }
+.am-detail .act-grid { margin-top: 4px; }
+@media (max-width: 1000px) { .am-body { grid-template-columns: 160px 1fr 260px; } }
