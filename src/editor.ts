@@ -1,21 +1,37 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { ASSETS, CATEGORIES, animateAsset } from './assets.js';
-import { SCENES } from './scenes.js';
+import type { AssetDef, EnvSettings, LayoutData, LayoutItem, ProjectBundle, Vec3 } from './core/types';
+import { AssetRegistry } from './core/registry';
+import { walkComponents } from './core/layout';
+import { optimizeInstance, planStats } from './core/optimize';
+import { renderThumbnail } from './core/thumbs';
+import { UserAssetLibrary } from './assets/library';
+import { IdbAssetStore, MemoryAssetStore, type AssetStore } from './assets/store';
+import { AssetManagerUI } from './assets/manager-ui';
+import { BUILTIN_PACKS } from './packs/index';
 
 /* =========================================================
-   FactoryForge 编辑器核心
+   FactoryForge 编辑器
    ========================================================= */
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const r3 = (a) => a.map(v => Math.round(v * 1000) / 1000);
+type Obj = THREE.Object3D;
+// 默认按 HTMLInputElement 返回，便于读写 value / disabled / checked（按钮、下拉框同样具有这些属性）
+const $ = <T extends HTMLElement = HTMLInputElement>(id: string): T => document.getElementById(id) as T;
+const $in = (id: string) => $<HTMLInputElement>(id);
+const esc = (s: unknown) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+const r3 = (a: number[]) => a.map(v => Math.round(v * 1000) / 1000) as Vec3;
+
+/** ?nomerge：关闭静态合并（用于对比性能 / 排查合并问题） */
+const NO_MERGE = new URLSearchParams(location.search).has('nomerge');
+
+// ---------- 资产注册表 ----------
+export const registry = new AssetRegistry();
+BUILTIN_PACKS.forEach(p => registry.registerPack(p));
 
 // ---------- 渲染器 / 场景 ----------
-const canvas = $('canvas');
+const canvas = $<HTMLCanvasElement>('canvas');
 const viewport = $('viewport');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -24,7 +40,6 @@ renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#11161d');
-
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enableDamping = true;
@@ -43,26 +58,33 @@ const groundMat = new THREE.MeshStandardMaterial({ color: '#2a3038', roughness: 
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), groundMat);
 ground.receiveShadow = true;
 scene.add(ground);
-let grid = null;
+let grid: THREE.LineSegments | null = null;
 
 const transform = new TransformControls(camera, renderer.domElement);
 transform.setSize(0.9);
 scene.add(transform);
 
+// ---------- 按需渲染 ----------
+let needsRender = true;
+const invalidate = () => { needsRender = true; };
+orbit.addEventListener('change', invalidate);
+transform.addEventListener('change', invalidate);
+for (const ev of ['pointerdown', 'pointerup', 'wheel', 'keydown', 'input', 'change']) window.addEventListener(ev, invalidate, true);
+
 // ---------- 环境 ----------
-const DEFAULT_ENV = {
+const DEFAULT_ENV: EnvSettings = {
   name: '未命名场景', ground: { w: 60, d: 60, cx: 0, cz: 0 }, groundColor: '#2a3038', background: '#11161d',
   fog: true, grid: true, shadows: true, sun: { intensity: 2.4, azimuth: 35, elevation: 55 },
   camera: { pos: [22, 18, 26], target: [0, 0, 0] },
 };
-let env = structuredClone(DEFAULT_ENV);
-function mergeEnv(e = {}) {
+let env: EnvSettings = structuredClone(DEFAULT_ENV);
+function mergeEnv(e: Partial<EnvSettings> = {}): EnvSettings {
   return { ...structuredClone(DEFAULT_ENV), ...e, ground: { ...DEFAULT_ENV.ground, ...(e.ground || {}) }, sun: { ...DEFAULT_ENV.sun, ...(e.sun || {}) } };
 }
 const envSize = () => Math.max(env.ground.w, env.ground.d);
 
-function makeGrid(w, d, step) {
-  const pts = [];
+function makeGrid(w: number, d: number, step: number): THREE.LineSegments {
+  const pts: number[] = [];
   for (let x = -w / 2; x <= w / 2 + 1e-6; x += step) pts.push(x, 0, -d / 2, x, 0, d / 2);
   for (let z = -d / 2; z <= d / 2 + 1e-6; z += step) pts.push(-w / 2, 0, z, w / 2, 0, z);
   const g = new THREE.BufferGeometry();
@@ -70,14 +92,18 @@ function makeGrid(w, d, step) {
   return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x8090a0, transparent: true, opacity: 0.18, depthWrite: false }));
 }
 
-function applyEnv(moveCamera) {
+function applyEnv(moveCamera: boolean): void {
   const g = env.ground, size = envSize();
   ground.scale.set(g.w, 1, g.d);
   ground.position.set(g.cx, 0, g.cz);
   groundMat.color.set(env.groundColor);
-  scene.background.set(env.background);
+  (scene.background as THREE.Color).set(env.background);
   scene.fog = env.fog ? new THREE.Fog(env.background, size * 0.9, size * 2.6) : null;
-  if (grid) { scene.remove(grid); grid.geometry.dispose(); grid.material.dispose(); }
+  if (grid) {
+    scene.remove(grid);
+    grid.geometry.dispose();
+    (grid.material as THREE.Material).dispose();
+  }
   grid = makeGrid(g.w, g.d, size > 100 ? 5 : 1);
   grid.position.set(g.cx, 0.012, g.cz);
   grid.visible = env.grid;
@@ -91,8 +117,9 @@ function applyEnv(moveCamera) {
     orbit.target.fromArray(env.camera.target);
     orbit.update();
   }
+  invalidate();
 }
-function updateSun() {
+function updateSun(): void {
   const g = env.ground, size = envSize();
   const az = THREE.MathUtils.degToRad(env.sun.azimuth), el = THREE.MathUtils.degToRad(env.sun.elevation);
   const r = size * 0.9;
@@ -108,57 +135,72 @@ function updateSun() {
   const mapSize = size > 100 ? 4096 : 2048;
   if (sun.shadow.mapSize.x !== mapSize) {
     sun.shadow.mapSize.set(mapSize, mapSize);
-    if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+    if (sun.shadow.map) { sun.shadow.map.dispose(); (sun.shadow as { map: THREE.WebGLRenderTarget | null }).map = null; }
   }
   sun.castShadow = env.shadows;
+  invalidate();
 }
 
-// ---------- 物体注册 ----------
-const objects = [];                 // 顶层可编辑物体
-const customModels = new Map();     // 导入的 glb：ref -> { name, model }
+// ---------- 物体 ----------
+const objects: Obj[] = [];   // 顶层可编辑物体
 let idCounter = 1;
-const isEditable = (o) => !!(o.userData.factoryType || o.userData.isGroup || o.userData.isCustom);
+const isEditable = (o: Obj) => !!(o.userData.factoryType || o.userData.isGroup || o.userData.missingType);
+const defOf = (o: Obj): AssetDef | undefined => (o.userData.factoryType ? registry.get(o.userData.factoryType) : undefined);
 
-function defName(obj) {
-  if (obj.userData.isGroup) return '分组 ' + obj.userData.uid;
-  if (obj.userData.isCustom) return (customModels.get(obj.userData.ref)?.name || '模型') + ' ' + obj.userData.uid;
-  return (ASSETS[obj.userData.factoryType]?.name || '物体') + ' ' + obj.userData.uid;
-}
-function iconOf(o) {
+function iconOf(o: Obj): string {
   if (o.userData.isGroup) return '📁';
-  if (o.userData.isCustom) return '🧊';
-  return ASSETS[o.userData.factoryType]?.icon || '▫';
+  if (o.userData.missingType) return '⚠️';
+  return defOf(o)?.icon || '▫';
 }
-function typeName(o) {
+function typeName(o: Obj): string {
   if (o.userData.isGroup) return '分组';
-  if (o.userData.isCustom) return '自定义模型';
-  return ASSETS[o.userData.factoryType]?.name || '';
+  if (o.userData.missingType) return '缺失资产';
+  return defOf(o)?.name || '';
+}
+function defName(o: Obj): string {
+  if (o.userData.isGroup) return '分组 ' + o.userData.uid;
+  return typeName(o) + ' ' + o.userData.uid;
+}
+
+/** 资产缺失（未安装的资产包 / 已删除的用户模型）：显示占位框，保留原始数据以便恢复 */
+function buildPlaceholder(type: string): THREE.Group {
+  const g = new THREE.Group();
+  const box = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshStandardMaterial({ color: '#ff9f43', transparent: true, opacity: 0.25, depthWrite: false }));
+  box.position.y = 1;
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box.geometry), new THREE.LineBasicMaterial({ color: '#ff9f43' }));
+  edges.position.y = 1;
+  g.add(box, edges);
+  g.userData.missingType = type;
+  g.userData.mainMats = [box.material, edges.material];
+  return g;
 }
 
 /** 由布局数据构建物体（不加入场景） */
-function createFromData(d) {
-  const kind = d.kind || 'component';
-  let obj;
-  if (kind === 'group') {
+function createFromData(d: LayoutItem): Obj | null {
+  let obj: THREE.Group;
+  if (d.kind === 'group') {
     obj = new THREE.Group();
     obj.userData.isGroup = true;
-    for (const c of d.children || []) { const ch = createFromData(c); if (ch) obj.add(ch); }
+    for (const c of d.children || []) {
+      const ch = createFromData(c);
+      if (ch) obj.add(ch);
+    }
     if (!obj.children.length) return null;
     obj.userData.baseColor = '#5b8def';
-  } else if (kind === 'custom') {
-    const src = customModels.get(d.ref);
-    if (!src) return null;
-    obj = new THREE.Group();
-    obj.add(src.model.clone(true));
-    obj.userData.isCustom = true;
-    obj.userData.ref = d.ref;
+  } else if (d.kind === 'custom') {
+    obj = buildPlaceholder('legacy-custom:' + d.ref);
   } else {
-    const def = ASSETS[d.type];
-    if (!def) return null;
-    const color = d.color || def.color;
-    obj = def.build(color);
-    obj.userData.factoryType = d.type;
-    obj.userData.baseColor = color;
+    const def = registry.get(d.type);
+    if (!def) {
+      obj = buildPlaceholder(d.type);
+      if (d.color) obj.userData.savedColor = d.color;
+    } else {
+      const color = d.color || def.color;
+      obj = def.build(color);
+      if (def.optimize && !NO_MERGE) optimizeInstance(def.id, obj);
+      obj.userData.factoryType = def.id;
+      obj.userData.baseColor = color;
+    }
   }
   const uid = d.uid ?? idCounter;
   obj.userData.uid = uid;
@@ -167,49 +209,97 @@ function createFromData(d) {
   if (d.position) obj.position.fromArray(d.position);
   if (d.rotation) obj.rotation.set(d.rotation[0], d.rotation[1], d.rotation[2]);
   if (d.scale) obj.scale.fromArray(d.scale);
-  obj.userData.locked = d.locked ?? (kind === 'component' && !!ASSETS[d.type]?.locked);
+  obj.userData.locked = d.locked ?? (d.kind !== 'group' && d.kind !== 'custom' && !!registry.get(d.type)?.locked);
   obj.visible = !d.hidden;
   return obj;
 }
-function serializeObject(o) {
-  const out = {
-    uid: o.userData.uid, name: o.name,
+function serializeObject(o: Obj): LayoutItem {
+  const base = {
+    uid: o.userData.uid as number, name: o.name,
     position: r3(o.position.toArray()),
     rotation: r3([o.rotation.x, o.rotation.y, o.rotation.z]),
     scale: r3(o.scale.toArray()),
+    ...(o.userData.locked ? { locked: true } : {}),
+    ...(!o.visible ? { hidden: true } : {}),
   };
-  if (o.userData.locked) out.locked = true;
-  if (!o.visible) out.hidden = true;
-  if (o.userData.isGroup) { out.kind = 'group'; out.children = o.children.filter(isEditable).map(serializeObject); }
-  else if (o.userData.isCustom) { out.kind = 'custom'; out.ref = o.userData.ref; }
-  else { out.kind = 'component'; out.type = o.userData.factoryType; out.color = o.userData.baseColor; }
-  return out;
+  if (o.userData.isGroup) return { kind: 'group', ...base, children: o.children.filter(isEditable).map(serializeObject) };
+  if (o.userData.missingType) {
+    const t = o.userData.missingType as string;
+    if (t.startsWith('legacy-custom:')) return { kind: 'custom', ref: t.slice(14), ...base };
+    return { kind: 'component', type: t, ...(o.userData.savedColor ? { color: o.userData.savedColor } : {}), ...base };
+  }
+  return { kind: 'component', type: o.userData.factoryType, color: o.userData.baseColor, ...base };
 }
-function stripUids(d) { delete d.uid; (d.children || []).forEach(stripUids); return d; }
+function stripUids(d: LayoutItem): LayoutItem {
+  delete d.uid;
+  if (d.kind === 'group') d.children.forEach(stripUids);
+  return d;
+}
 
-function addToScene(obj) { scene.add(obj); objects.push(obj); }
-function disposeObject(obj) {
-  if (obj.userData.isCustom) return; // 与模型源共享资源
-  obj.traverse(n => {
-    if (n.geometry && !n.geometry.userData.shared) n.geometry.dispose();
-    (n.userData.mainMats || []).forEach(m => m.dispose());
-  });
+function addToScene(obj: Obj): void {
+  scene.add(obj);
+  objects.push(obj);
+  invalidate();
 }
-function removeFromScene(obj) {
+function disposeObject(obj: Obj): void {
+  obj.traverse(n => {
+    const g = (n as THREE.Mesh).geometry;
+    if (g && !g.userData.shared) g.dispose();
+  });
+  ((obj.userData.mainMats || []) as THREE.Material[]).forEach(m => m.dispose());
+}
+function removeFromScene(obj: Obj): void {
   removeOutline(obj);
   obj.parent?.remove(obj);
   const i = objects.indexOf(obj);
   if (i >= 0) objects.splice(i, 1);
   disposeObject(obj);
+  invalidate();
 }
-function setColor(obj, color) {
+function setColor(obj: Obj, color: string): void {
   obj.userData.baseColor = color;
   if (obj.userData.isGroup) obj.children.forEach(c => isEditable(c) && setColor(c, color));
-  else (obj.userData.mainMats || []).forEach(m => m.color.set(color));
+  else if (defOf(obj)?.colorable) ((obj.userData.mainMats || []) as THREE.MeshStandardMaterial[]).forEach(m => m.color.set(color));
+  invalidate();
+}
+/** 场景中使用某资产的实例数（含分组内） */
+function usageOf(assetId: string): number {
+  let n = 0;
+  const walk = (o: Obj) => {
+    if (o.userData.isGroup) o.children.forEach(walk);
+    else if (o.userData.factoryType === assetId || o.userData.missingType === assetId) n++;
+  };
+  objects.forEach(walk);
+  return n;
+}
+/** 资产更新后（新版本 / 重新处理 / 恢复）重建场景中的实例，保持变换和层级 */
+function rebuildInstances(assetId: string): number {
+  detachMultiProxy();
+  let n = 0;
+  const visit = (o: Obj): void => {
+    if (o.userData.isGroup) { [...o.children].forEach(visit); return; }
+    if (o.userData.factoryType !== assetId && o.userData.missingType !== assetId) return;
+    const fresh = createFromData(serializeObject(o));
+    if (!fresh || !o.parent) return;
+    const parent = o.parent, idx = parent.children.indexOf(o);
+    removeOutline(o);
+    parent.remove(o);
+    disposeObject(o);
+    parent.children.splice(idx, 0, fresh);
+    fresh.parent = parent;
+    const ti = objects.indexOf(o);
+    if (ti >= 0) objects[ti] = fresh;
+    selection = selection.map(s => (s === o ? fresh : s));
+    n++;
+  };
+  [...objects].forEach(visit);
+  select(selection, { silent: true });
+  refreshAll();
+  return n;
 }
 
 // ---------- 序列化 ----------
-function serialize(withCamera = true) {
+function serialize(withCamera = true): LayoutData & { env: EnvSettings } {
   const had = !!multiProxy;
   if (had) detachMultiProxy();
   const data = { app: 'FactoryForge', version: 3, env: structuredClone(env), objects: objects.map(serializeObject) };
@@ -226,7 +316,7 @@ function clearAll() {
   objects.slice().forEach(removeFromScene);
 }
 /** 加载布局；返回未能还原的物体数 */
-function loadData(data, { resetHist = true, moveCamera = true, selectUids = null } = {}) {
+function loadData(data: LayoutData, { resetHist = true, moveCamera = true, selectUids = null as number[] | null } = {}): number {
   if (!data || !Array.isArray(data.objects)) throw new Error('无效的布局数据');
   clearAll();
   env = mergeEnv(data.env);
@@ -244,17 +334,17 @@ function loadData(data, { resetHist = true, moveCamera = true, selectUids = null
 }
 
 // ---------- 选择 / 高亮 ----------
-let selection = [];
-let multiProxy = null;
+let selection: Obj[] = [];
+let multiProxy: THREE.Group | null = null;
 
-function addOutline(obj) {
+function addOutline(obj: Obj): void {
   removeOutline(obj);
   const helper = new THREE.Box3Helper(new THREE.Box3().setFromObject(obj), obj.userData.locked ? 0xff9f43 : 0x4f9dff);
   helper.raycast = () => {};
   obj.userData.outline = helper;
   scene.add(helper);
 }
-function removeOutline(obj) {
+function removeOutline(obj: Obj): void {
   const h = obj.userData.outline;
   if (!h) return;
   scene.remove(h); h.geometry.dispose(); h.material.dispose();
@@ -267,14 +357,15 @@ function updateOutlines() {
 function attachMultiProxy() {
   detachMultiProxy();
   if (selection.some(o => o.userData.locked)) return;
-  multiProxy = new THREE.Group();
+  const proxy = new THREE.Group();
+  multiProxy = proxy;
   const box = new THREE.Box3();
   selection.forEach(o => box.expandByObject(o));
-  box.getCenter(multiProxy.position);
-  multiProxy.position.y = box.min.y;
-  scene.add(multiProxy);
-  selection.forEach(o => multiProxy.attach(o));
-  transform.attach(multiProxy);
+  box.getCenter(proxy.position);
+  proxy.position.y = box.min.y;
+  scene.add(proxy);
+  selection.forEach(o => proxy.attach(o));
+  transform.attach(proxy);
 }
 function detachMultiProxy() {
   if (!multiProxy) return;
@@ -284,22 +375,22 @@ function detachMultiProxy() {
   multiProxy = null;
 }
 
-function select(arr, { silent = false } = {}) {
+function select(arr: (Obj | null | undefined)[], { silent = false } = {}): void {
   detachMultiProxy();
   selection.forEach(removeOutline);
-  selection = [...new Set(arr.filter(Boolean))];
+  selection = [...new Set(arr.filter((o): o is Obj => !!o))];
   transform.detach();
   if (selection.length === 1 && !selection[0].userData.locked) transform.attach(selection[0]);
   else if (selection.length > 1) attachMultiProxy();
   selection.forEach(addOutline);
   if (!silent) refreshAll();
 }
-function toggleSelect(obj) {
+function toggleSelect(obj: Obj): void {
   select(selection.includes(obj) ? selection.filter(o => o !== obj) : [...selection, obj]);
 }
 
 // ---------- 历史记录（撤销 / 重做） ----------
-const history = { stack: [], index: -1, lock: false };
+const history: { stack: { json: string; sel: number[] }[]; index: number; lock: boolean } = { stack: [], index: -1, lock: false };
 function snapshot() { return { json: JSON.stringify(serialize(false)), sel: selection.map(o => o.userData.uid) }; }
 function resetHistory() { history.stack = [snapshot()]; history.index = 0; updateHistoryButtons(); }
 function pushHistory() {
@@ -312,9 +403,9 @@ function pushHistory() {
   history.index = history.stack.length - 1;
   updateHistoryButtons();
 }
-let histTimer = 0;
+let histTimer: ReturnType<typeof setTimeout> | undefined;
 function pushHistorySoon() { clearTimeout(histTimer); histTimer = setTimeout(pushHistory, 400); }
-function restoreHistory(i) {
+function restoreHistory(i: number): void {
   const s = history.stack[i];
   if (!s) return;
   history.lock = true;
@@ -332,12 +423,13 @@ function updateHistoryButtons() {
 
 // ---------- 编辑操作 ----------
 let snapOn = false;
-const snapV = (v) => (snapOn ? Math.round(v) : Math.round(v * 100) / 100);
+const snapV = (v: number) => (snapOn ? Math.round(v) : Math.round(v * 100) / 100);
 
-function addAsset(type, x, z) {
-  const def = ASSETS[type];
+function addAsset(type: string, x: number, z: number): void {
+  const def = registry.get(type);
   if (!def) return;
-  const obj = createFromData({ kind: 'component', type, position: [snapV(x), def.placeY ?? 0, snapV(z)] });
+  const obj = createFromData({ kind: 'component', type: def.id, position: [snapV(x), def.placeY ?? 0, snapV(z)] });
+  if (!obj) return;
   addToScene(obj);
   select([obj]);
   pushHistory();
@@ -358,7 +450,8 @@ function duplicateSelected() {
   const step = snapOn ? 2 : 1.5;
   const clones = selection.map(src => {
     const d = stripUids(serializeObject(src));
-    d.position[0] += step; d.position[2] += step;
+    const pos = d.position ?? [0, 0, 0];
+    d.position = [pos[0] + step, pos[1], pos[2] + step];
     d.locked = false;
     const c = createFromData(d);
     if (c) addToScene(c);
@@ -394,7 +487,7 @@ function ungroupSelected() {
   const groups = selection.filter(o => o.userData.isGroup);
   if (!groups.length) return toast('请选择一个分组');
   detachMultiProxy();
-  const freed = [];
+  const freed: Obj[] = [];
   groups.forEach(grp => {
     removeOutline(grp);
     [...grp.children].filter(isEditable).forEach(ch => { scene.attach(ch); objects.push(ch); freed.push(ch); });
@@ -405,17 +498,17 @@ function ungroupSelected() {
   select(freed);
   pushHistory();
 }
-function setLocked(list, v) {
+function setLocked(list: Obj[], v: boolean): void {
   list.forEach(o => (o.userData.locked = v));
   select(selection);
   pushHistory();
 }
-function setHidden(list, hidden) {
+function setHidden(list: Obj[], hidden: boolean): void {
   list.forEach(o => (o.visible = !hidden));
   pushHistory();
   refreshAll();
 }
-function dropToGround(list) {
+function dropToGround(list: Obj[]): void {
   detachMultiProxy();
   list.forEach(o => {
     const b = new THREE.Box3().setFromObject(o);
@@ -425,7 +518,7 @@ function dropToGround(list) {
   pushHistory();
 }
 /** 多选对齐：axis 'x'|'z'，mode 'min'|'center'|'max'|'dist' */
-function alignSelected(axis, mode) {
+function alignSelected(axis: 'x' | 'z', mode: 'min' | 'center' | 'max' | 'dist'): void {
   if (selection.length < 2) return;
   detachMultiProxy();
   const items = selection.map(o => ({ o, b: new THREE.Box3().setFromObject(o) }));
@@ -455,24 +548,24 @@ const raycaster = new THREE.Raycaster();
 raycaster.params.Line.threshold = 0.15;
 const pointer = new THREE.Vector2();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-let downInfo = null;
+let downInfo: { x: number; y: number; button: number; gizmo: boolean } | null = null;
 
-function setPointer(e) {
+function setPointer(e: { clientX: number; clientY: number }): void {
   const r = canvas.getBoundingClientRect();
   pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
 }
-function groundPoint(e) {
+function groundPoint(e: { clientX: number; clientY: number }): THREE.Vector3 | null {
   setPointer(e);
   return raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
 }
-function pickObject(e) {
+function pickObject(e: { clientX: number; clientY: number }): Obj | null {
   setPointer(e);
   const candidates = objects.filter(o => o.visible && !o.userData.locked);
   const hits = raycaster.intersectObjects(candidates, true);
   for (const h of hits) {
-    let n = h.object, visible = true;
-    for (let p = n; p; p = p.parent) if (!p.visible) visible = false;
+    let n: Obj | null = h.object, visible = true;
+    for (let p: Obj | null = n; p; p = p.parent) if (!p.visible) visible = false;
     if (!visible) continue;
     while (n && !objects.includes(n)) n = n.parent;
     if (n) return n;
@@ -508,95 +601,19 @@ transform.addEventListener('objectChange', () => syncInspector());
 
 // 拖拽素材到视口
 viewport.addEventListener('dragover', (e) => {
-  if (![...e.dataTransfer.types].includes('text/plain')) return;
+  if (![...e.dataTransfer!.types].includes('text/plain')) return;
   e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
+  e.dataTransfer!.dropEffect = 'copy';
   $('dropHint').classList.remove('hidden');
 });
-viewport.addEventListener('dragleave', (e) => { if (!viewport.contains(e.relatedTarget)) $('dropHint').classList.add('hidden'); });
+viewport.addEventListener('dragleave', (e) => { if (!viewport.contains(e.relatedTarget as Node | null)) $('dropHint').classList.add('hidden'); });
 viewport.addEventListener('drop', (e) => {
   e.preventDefault();
   $('dropHint').classList.add('hidden');
-  const key = e.dataTransfer.getData('text/plain').replace(/^asset:/, '');
+  const key = e.dataTransfer!.getData('text/plain').replace(/^asset:/, '');
   const p = groundPoint(e);
-  if (ASSETS[key] && p) addAsset(key, p.x, p.z);
+  if (registry.get(key) && p) addAsset(key, p.x, p.z);
 });
-
-// ---------- 素材库 ----------
-const thumbImgs = new Map(); // key -> [img]
-function buildLibrary() {
-  const lib = $('lib');
-  lib.innerHTML = '';
-  for (const cat of CATEGORIES) {
-    const keys = Object.keys(ASSETS).filter(k => ASSETS[k].cat === cat.id);
-    const sec = document.createElement('details');
-    sec.className = 'lib-sec';
-    sec.open = true;
-    sec.innerHTML = `<summary>${cat.name}<span class="count">${keys.length}</span></summary><div class="lib-grid"></div>`;
-    const gridEl = sec.querySelector('.lib-grid');
-    for (const key of keys) {
-      const def = ASSETS[key];
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.draggable = true;
-      card.dataset.key = key;
-      card.dataset.search = (def.name + key + cat.name).toLowerCase();
-      card.title = `${def.name}（点击添加 / 拖拽放置）`;
-      card.innerHTML = `<div class="thumb"><span class="emoji">${def.icon}</span><img alt="" /></div><div class="card-name">${def.name}</div>`;
-      card.addEventListener('click', () => { const t = orbit.target; addAsset(key, t.x, t.z); });
-      card.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', 'asset:' + key); e.dataTransfer.effectAllowed = 'copy'; });
-      thumbImgs.set(key, card.querySelector('img'));
-      gridEl.appendChild(card);
-    }
-    lib.appendChild(sec);
-  }
-  $('libSearch').addEventListener('input', (e) => {
-    const q = e.target.value.trim().toLowerCase();
-    lib.querySelectorAll('.lib-sec').forEach(sec => {
-      let any = 0;
-      sec.querySelectorAll('.card').forEach(c => { const ok = !q || c.dataset.search.includes(q); c.style.display = ok ? '' : 'none'; any += ok; });
-      sec.style.display = any ? '' : 'none';
-      if (q) sec.open = true;
-    });
-  });
-}
-
-/** 用离屏渲染器给每个素材生成缩略图 */
-async function generateThumbnails() {
-  const W = 160, H = 120;
-  let r;
-  try { r = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); }
-  catch { return; }
-  r.setSize(W, H);
-  r.setPixelRatio(1);
-  r.toneMapping = THREE.ACESFilmicToneMapping;
-  const sc = new THREE.Scene();
-  sc.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
-  const dl = new THREE.DirectionalLight(0xffffff, 2.6);
-  dl.position.set(5, 10, 7);
-  sc.add(dl);
-  const cam = new THREE.PerspectiveCamera(32, W / H, 0.1, 5000);
-  const dir = new THREE.Vector3(1, 0.7, 1.2).normalize();
-  const sphere = new THREE.Sphere();
-  for (const [key, def] of Object.entries(ASSETS)) {
-    const obj = def.build(def.color);
-    sc.add(obj);
-    new THREE.Box3().setFromObject(obj).getBoundingSphere(sphere);
-    const dist = (sphere.radius / Math.sin(THREE.MathUtils.degToRad(cam.fov / 2))) * 0.95;
-    cam.position.copy(sphere.center).addScaledVector(dir, dist);
-    cam.near = dist / 100; cam.far = dist * 4;
-    cam.updateProjectionMatrix();
-    cam.lookAt(sphere.center);
-    r.render(sc, cam);
-    const img = thumbImgs.get(key);
-    if (img) { img.src = r.domElement.toDataURL('image/png'); img.parentElement.classList.add('ready'); }
-    sc.remove(obj);
-    disposeObject(obj);
-    await new Promise(res => setTimeout(res, 0));
-  }
-  r.dispose();
-  r.forceContextLoss();
-}
 
 // ---------- 场景大纲 ----------
 let activeTab = 'library';
@@ -607,7 +624,7 @@ function scheduleOutliner() {
   requestAnimationFrame(() => { outlinerQueued = false; renderOutliner(); });
 }
 function renderOutliner() {
-  $('objCountBadge').textContent = objects.length;
+  $('objCountBadge').textContent = String(objects.length);
   if (activeTab !== 'outliner') return;
   const q = $('olSearch').value.trim().toLowerCase();
   const html = [];
@@ -622,20 +639,20 @@ function renderOutliner() {
   $('olList').innerHTML = html.join('') || '<div class="empty">暂无物体</div>';
 }
 $('olList').addEventListener('click', (e) => {
-  const row = e.target.closest('.ol-row');
+  const row = (e.target as HTMLElement).closest<HTMLElement>('.ol-row');
   if (!row) return;
-  const obj = objects.find(o => o.userData.uid === +row.dataset.uid);
+  const obj = objects.find(o => o.userData.uid === +row.dataset.uid!);
   if (!obj) return;
-  const act = e.target.closest('.ol-btn')?.dataset.act;
+  const act = (e.target as HTMLElement).closest<HTMLElement>('.ol-btn')?.dataset.act;
   if (act === 'vis') return setHidden([obj], obj.visible);
   if (act === 'lock') return setLocked([obj], !obj.userData.locked);
   e.shiftKey ? toggleSelect(obj) : select([obj]);
 });
-$('olList').addEventListener('dblclick', (e) => { if (e.target.closest('.ol-row') && !e.target.closest('.ol-btn')) focusSelection(); });
+$('olList').addEventListener('dblclick', (e) => { if ((e.target as HTMLElement).closest<HTMLElement>('.ol-row') && !(e.target as HTMLElement).closest<HTMLElement>('.ol-btn')) focusSelection(); });
 $('olSearch').addEventListener('input', renderOutliner);
-document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-  activeTab = t.dataset.tab;
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+document.querySelectorAll<HTMLElement>('.tab').forEach(t => t.addEventListener('click', () => {
+  activeTab = t.dataset.tab!;
+  document.querySelectorAll<HTMLElement>('.tab').forEach(x => x.classList.toggle('active', x === t));
   $('tab-library').classList.toggle('hidden', activeTab !== 'library');
   $('tab-outliner').classList.toggle('hidden', activeTab !== 'outliner');
   renderOutliner();
@@ -644,21 +661,21 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 // ---------- 属性面板 ----------
 const SWATCHES = ['#f0b429', '#e04b3a', '#e8742a', '#2fa36b', '#3a7bd5', '#1f3b5c', '#7b4fd6', '#e9edf0', '#8a909a', '#2b323c'];
 const inspBody = $('inspBody');
-const deg = (r) => Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
+const deg = (r: number) => Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
 
-function vec3Row(label, id, step) {
+function vec3Row(label: string, id: string, step: number): string {
   return `<div class="field"><label>${label}</label><div class="vec3">` +
     ['x', 'y', 'z'].map(a => `<div class="axis-in"><span class="ax ${a}">${a.toUpperCase()}</span><input type="number" step="${step}" id="${id}-${a}" /></div>`).join('') +
     `</div></div>`;
 }
-function section(title, body, open = true) {
+function section(title: string, body: string, open = true): string {
   return `<details class="sec" ${open ? 'open' : ''}><summary>${title}</summary><div class="sec-body">${body}</div></details>`;
 }
 function swatchesHtml() {
   return `<div class="swatches">${SWATCHES.map(c => `<button class="sw" data-c="${c}" style="background:${c}" title="${c}"></button>`).join('')}</div>`;
 }
-function bindSwatches(apply) {
-  inspBody.querySelectorAll('.sw').forEach(b => b.addEventListener('click', () => { apply(b.dataset.c); pushHistory(); }));
+function bindSwatches(apply: (c: string) => void): void {
+  inspBody.querySelectorAll<HTMLElement>('.sw').forEach(b => b.addEventListener('click', () => { apply(b.dataset.c!); pushHistory(); }));
 }
 
 function refreshInspector() {
@@ -667,11 +684,11 @@ function refreshInspector() {
   renderSinglePanel(selection[0]);
 }
 
-function renderSinglePanel(o) {
+function renderSinglePanel(o: Obj): void {
   $('inspTitle').textContent = '物体属性';
   const locked = o.userData.locked;
   const size = new THREE.Box3().setFromObject(o).getSize(new THREE.Vector3());
-  const canColor = !o.userData.isCustom;
+  const canColor = !!o.userData.isGroup || !!defOf(o)?.colorable;
   inspBody.innerHTML =
     `<div class="obj-head"><span class="obj-ico">${iconOf(o)}</span><div class="obj-meta">` +
     `<input type="text" id="f-name" class="name-in" /><div class="obj-sub">${typeName(o)} · #${o.userData.uid} · 约 ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m</div></div></div>` +
@@ -689,14 +706,15 @@ function renderSinglePanel(o) {
       <button class="act danger" data-act="del">🗑 删除</button></div>`);
 
   $('f-name').value = o.name;
-  $('f-name').addEventListener('input', (e) => { o.name = e.target.value; scheduleOutliner(); });
+  $('f-name').addEventListener('input', (e) => { o.name = (e.target as HTMLInputElement).value; scheduleOutliner(); });
   $('f-name').addEventListener('change', pushHistory);
-  const apply = {
-    pos: (a, v) => (o.position[a] = v),
-    rot: (a, v) => (o.rotation[a] = THREE.MathUtils.degToRad(v)),
-    scl: (a, v) => (o.scale[a] = Math.max(0.01, v)),
+  type Ax = 'x' | 'y' | 'z';
+  const apply: Record<'pos' | 'rot' | 'scl', (a: Ax, v: number) => void> = {
+    pos: (a, v) => { o.position[a] = v; },
+    rot: (a, v) => { o.rotation[a] = THREE.MathUtils.degToRad(v); },
+    scl: (a, v) => { o.scale[a] = Math.max(0.01, v); },
   };
-  for (const k of ['pos', 'rot', 'scl']) for (const a of ['x', 'y', 'z']) {
+  for (const k of ['pos', 'rot', 'scl'] as const) for (const a of ['x', 'y', 'z'] as const) {
     const el = $(`${k}-${a}`);
     el.disabled = locked;
     el.addEventListener('input', () => { const v = parseFloat(el.value); if (Number.isFinite(v)) { apply[k](a, v); updateOutlines(); } });
@@ -708,14 +726,14 @@ function renderSinglePanel(o) {
   uni.addEventListener('change', pushHistory);
   if (canColor) {
     const col = $('f-color');
-    const setC = (c) => { setColor(o, c); col.value = c; $('colorHex').textContent = c; };
+    const setC = (c: string) => { setColor(o, c); col.value = c; $('colorHex').textContent = c; };
     col.value = o.userData.baseColor || '#ffffff';
     $('colorHex').textContent = col.value;
     col.addEventListener('input', () => setC(col.value));
     col.addEventListener('change', pushHistory);
     bindSwatches(setC);
   }
-  inspBody.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
+  inspBody.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => {
     const act = b.dataset.act;
     if (act === 'ground') dropToGround([o]);
     else if (act === 'resetRot') { o.rotation.set(0, 0, 0); select([o]); pushHistory(); }
@@ -735,13 +753,13 @@ function syncInspector() {
   updateOutlines();
   if (selection.length !== 1) return;
   const o = selection[0];
-  const vals = { pos: o.position.toArray(), rot: [o.rotation.x, o.rotation.y, o.rotation.z].map(deg), scl: o.scale.toArray() };
-  for (const k in vals) ['x', 'y', 'z'].forEach((a, i) => {
+  const vals: Record<'pos' | 'rot' | 'scl', number[]> = { pos: o.position.toArray(), rot: [o.rotation.x, o.rotation.y, o.rotation.z].map(deg), scl: o.scale.toArray() };
+  for (const k of ['pos', 'rot', 'scl'] as const) ['x', 'y', 'z'].forEach((a, i) => {
     const el = $(`${k}-${a}`);
-    if (el && document.activeElement !== el) el.value = k === 'rot' ? vals[k][i] : Math.round(vals[k][i] * 100) / 100;
+    if (el && document.activeElement !== el) el.value = String(k === 'rot' ? vals[k][i] : Math.round(vals[k][i] * 100) / 100);
   });
   const uni = $('f-uni');
-  if (uni && document.activeElement !== uni) uni.value = o.scale.x;
+  if (uni && document.activeElement !== uni) uni.value = String(o.scale.x);
   const sv = $('sclVal');
   if (sv) sv.textContent = o.scale.x.toFixed(2) + '×';
 }
@@ -761,12 +779,12 @@ function renderMultiPanel() {
       <button class="act" data-act="group">⛓ 成组</button><button class="act" data-act="dup">⧉ 复制</button>
       <button class="act" data-act="focus">◎ 聚焦</button><button class="act" data-act="lock">🔒 锁定</button>
       <button class="act" data-act="unlock">🔓 解锁</button><button class="act danger" data-act="del">🗑 删除</button></div>`);
-  const applyAll = (c) => selection.forEach(o => !o.userData.isCustom && setColor(o, c));
-  $('f-mcolor').addEventListener('input', (e) => applyAll(e.target.value));
+  const applyAll = (c: string) => selection.forEach(o => setColor(o, c));
+  $('f-mcolor').addEventListener('input', (e) => applyAll((e.target as HTMLInputElement).value));
   $('f-mcolor').addEventListener('change', pushHistory);
   bindSwatches(applyAll);
-  inspBody.querySelectorAll('[data-al]').forEach(b => b.addEventListener('click', () => { const [ax, m] = b.dataset.al.split(','); alignSelected(ax, m); }));
-  inspBody.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
+  inspBody.querySelectorAll<HTMLElement>('[data-al]').forEach(b => b.addEventListener('click', () => { const [ax, m] = b.dataset.al!.split(',') as ['x' | 'z', 'min' | 'center' | 'max' | 'dist']; alignSelected(ax, m); }));
+  inspBody.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => {
     const act = b.dataset.act;
     if (act === 'ground') dropToGround(selection);
     else if (act === 'group') groupSelected();
@@ -780,8 +798,8 @@ function renderMultiPanel() {
 
 function renderEnvPanel() {
   $('inspTitle').textContent = '场景设置';
-  const counts = {};
-  const walk = (o) => { if (o.userData.isGroup) o.children.filter(isEditable).forEach(walk); else counts[typeName(o)] = (counts[typeName(o)] || 0) + 1; };
+  const counts: Record<string, number> = {};
+  const walk = (o: Obj): void => { if (o.userData.isGroup) o.children.filter(isEditable).forEach(walk); else counts[typeName(o)] = (counts[typeName(o)] || 0) + 1; };
   objects.forEach(walk);
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
   inspBody.innerHTML =
@@ -797,24 +815,26 @@ function renderEnvPanel() {
       <div class="toggles"><label><input type="checkbox" id="e-shadow" /> 阴影</label><label><input type="checkbox" id="e-grid" /> 网格</label><label><input type="checkbox" id="e-fog" /> 雾效</label></div>`) +
     section('统计', `<div class="stats-list">${top.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') || '<div>空场景</div>'}</div>`, true);
 
-  const bind = (id, prop, read, live) => {
+  // 文本 / 数值 / 颜色 / 范围输入绑定 value；复选框绑定 checked
+  const bind = (id: string, read: () => string | number | boolean, live: (v: string & boolean) => void) => {
     const el = $(id);
-    el[prop] = read();
-    el.addEventListener('input', () => live(el[prop]));
+    const isCheck = el.type === 'checkbox';
+    if (isCheck) el.checked = !!read(); else el.value = String(read());
+    el.addEventListener('input', () => live((isCheck ? el.checked : el.value) as string & boolean));
     el.addEventListener('change', pushHistory);
   };
-  bind('e-name', 'value', () => env.name, v => { env.name = v; $('sceneName').textContent = v; });
-  bind('e-w', 'value', () => env.ground.w, v => { if (+v >= 10) { env.ground.w = +v; applyEnv(false); } });
-  bind('e-d', 'value', () => env.ground.d, v => { if (+v >= 10) { env.ground.d = +v; applyEnv(false); } });
-  bind('e-ground', 'value', () => env.groundColor, v => { env.groundColor = v; groundMat.color.set(v); });
-  bind('e-bg', 'value', () => env.background, v => { env.background = v; applyEnv(false); });
+  bind('e-name', () => env.name, v => { env.name = v; $('sceneName').textContent = v; });
+  bind('e-w', () => env.ground.w, v => { if (+v >= 10) { env.ground.w = +v; applyEnv(false); } });
+  bind('e-d', () => env.ground.d, v => { if (+v >= 10) { env.ground.d = +v; applyEnv(false); } });
+  bind('e-ground', () => env.groundColor, v => { env.groundColor = v; groundMat.color.set(v); });
+  bind('e-bg', () => env.background, v => { env.background = v; applyEnv(false); });
   const lbl = () => { $('v-int').textContent = env.sun.intensity.toFixed(1); $('v-az').textContent = env.sun.azimuth + '°'; $('v-el').textContent = env.sun.elevation + '°'; };
-  bind('e-int', 'value', () => env.sun.intensity, v => { env.sun.intensity = +v; updateSun(); lbl(); });
-  bind('e-az', 'value', () => env.sun.azimuth, v => { env.sun.azimuth = +v; updateSun(); lbl(); });
-  bind('e-el', 'value', () => env.sun.elevation, v => { env.sun.elevation = +v; updateSun(); lbl(); });
-  bind('e-shadow', 'checked', () => env.shadows, v => { env.shadows = v; updateSun(); });
-  bind('e-grid', 'checked', () => env.grid, v => { env.grid = v; grid.visible = v; });
-  bind('e-fog', 'checked', () => env.fog, v => { env.fog = v; applyEnv(false); });
+  bind('e-int', () => env.sun.intensity, v => { env.sun.intensity = +v; updateSun(); lbl(); });
+  bind('e-az', () => env.sun.azimuth, v => { env.sun.azimuth = +v; updateSun(); lbl(); });
+  bind('e-el', () => env.sun.elevation, v => { env.sun.elevation = +v; updateSun(); lbl(); });
+  bind('e-shadow', () => env.shadows, v => { env.shadows = v; updateSun(); });
+  bind('e-grid', () => env.grid, v => { env.grid = v; if (grid) grid.visible = v; });
+  bind('e-fog', () => env.fog, v => { env.fog = v; applyEnv(false); });
   lbl();
 }
 
@@ -830,22 +850,22 @@ function refreshAll() {
 }
 function updateStatus() {
   let total = 0;
-  const walk = (o) => { if (o.userData.isGroup) o.children.filter(isEditable).forEach(walk); else total++; };
+  const walk = (o: Obj): void => { if (o.userData.isGroup) o.children.filter(isEditable).forEach(walk); else total++; };
   objects.forEach(walk);
   $('stObjects').textContent = `物体 ${total}`;
   $('stSelection').textContent = selection.length ? `已选 ${selection.length}：${selection.length === 1 ? selection[0].name : '多个物体'}` : '未选中';
 }
 
 // ---------- 工具栏 ----------
-document.querySelectorAll('.fb-btn[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
-function setMode(m) {
+document.querySelectorAll<HTMLElement>('.fb-btn[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode as 'translate' | 'rotate' | 'scale')));
+function setMode(m: 'translate' | 'rotate' | 'scale'): void {
   transform.setMode(m);
-  document.querySelectorAll('.fb-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  document.querySelectorAll<HTMLElement>('.fb-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
 }
 function toggleSpace() {
   transform.setSpace(transform.space === 'local' ? 'world' : 'local');
   $('btnSpace').classList.toggle('active', transform.space === 'local');
-  $('btnSpace').querySelector('span').textContent = transform.space === 'local' ? '局部' : '世界';
+  $('btnSpace').querySelector('span')!.textContent = transform.space === 'local' ? '局部' : '世界';
 }
 function toggleSnap() {
   snapOn = !snapOn;
@@ -860,7 +880,7 @@ function toggleAnim() {
   animOn = !animOn;
   const b = $('btnAnim');
   b.classList.toggle('active', animOn);
-  b.firstChild.textContent = animOn ? '⏸' : '▶';
+  b.firstChild!.textContent = animOn ? '⏸' : '▶';
 }
 $('btnSpace').onclick = toggleSpace;
 $('btnSnap').onclick = toggleSnap;
@@ -872,25 +892,26 @@ $('btnUndo').onclick = undo;
 $('btnRedo').onclick = redo;
 
 // ---------- 视图 / 相机 ----------
-let camTween = null;
-function tweenCamera(pos, target, dur = 0.6) {
+let camTween: { p0: THREE.Vector3; t0: THREE.Vector3; p1: THREE.Vector3; t1: THREE.Vector3; k: number; dur: number } | null = null;
+function tweenCamera(pos: THREE.Vector3, target: THREE.Vector3, dur = 0.6): void {
   camTween = { p0: camera.position.clone(), t0: orbit.target.clone(), p1: pos.clone(), t1: target.clone(), k: 0, dur };
 }
-let currentView = 'persp';
-function setView(v) {
+type View = 'persp' | 'top' | 'front' | 'side';
+let currentView: View = 'persp';
+function setView(v: View): void {
   currentView = v;
-  document.querySelectorAll('.vb-btn[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  document.querySelectorAll<HTMLElement>('.vb-btn[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const target = orbit.target.clone();
   const dist = Math.max(camera.position.distanceTo(target), 10);
-  const dirs = { persp: [1, 0.75, 1.1], top: [0, 1, 0.0001], front: [0, 0.2, 1], side: [1, 0.2, 0] };
+  const dirs: Record<View, Vec3> = { persp: [1, 0.75, 1.1], top: [0, 1, 0.0001], front: [0, 0.2, 1], side: [1, 0.2, 0] };
   orbit.enableRotate = v !== 'top';
   orbit.maxPolarAngle = v === 'top' ? Math.PI : Math.PI / 2 - 0.02;
   tweenCamera(target.clone().addScaledVector(new THREE.Vector3(...dirs[v]).normalize(), dist), target);
   $('stHint').textContent = v === 'top' ? '俯视平面图：旋转已锁定 · 右键平移 · 滚轮缩放' : '左键选择 · Shift 多选 · 右键平移 · 滚轮缩放';
 }
-document.querySelectorAll('.vb-btn[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+document.querySelectorAll<HTMLElement>('.vb-btn[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view as View)));
 function focusSelection() {
-  const list = selection.length ? selection : objects.filter(o => !o.userData.factoryType || o.userData.factoryType !== 'water');
+  const list = selection.length ? selection : objects.filter(o => !o.userData.factoryType || !defOf(o)?.locked);
   if (!list.length) return;
   const box = new THREE.Box3();
   list.forEach(o => box.expandByObject(o));
@@ -901,119 +922,227 @@ function focusSelection() {
 }
 $('btnFocus').onclick = focusSelection;
 
+
+
+// ---------- 素材库（按资产包 → 分类） ----------
+const thumbCache = new Map<string, string>();
+let libPack = 'all';
+function assetThumb(def: AssetDef): string {
+  if (def.thumbnail) return def.thumbnail;
+  return thumbCache.get(def.id) ?? '';
+}
+function buildLibrary(): void {
+  const lib = $('lib');
+  const sel = $<HTMLSelectElement>('libPack');
+  const packs = registry.packs().filter(p => registry.byPack(p.id).length);
+  sel.innerHTML = `<option value="all">全部资产包（${registry.all().length}）</option>` +
+    packs.map(p => `<option value="${p.id}">${esc(p.name)}（${registry.byPack(p.id).length}）</option>`).join('');
+  if (libPack !== 'all' && !packs.some(p => p.id === libPack)) libPack = 'all';
+  sel.value = libPack;
+  const html: string[] = [];
+  for (const p of packs) {
+    if (libPack !== 'all' && libPack !== p.id) continue;
+    html.push(`<div class="pack-title"><span>${esc(p.name)}</span><span class="industry">${esc(p.industry)}</span></div>`);
+    for (const cat of p.categories) {
+      const list = registry.byPack(p.id).filter(a => a.cat === cat.id);
+      if (!list.length) continue;
+      html.push(`<details class="lib-sec" open><summary>${esc(cat.name)}<span class="count">${list.length}</span></summary><div class="lib-grid">`);
+      for (const a of list) {
+        const t = assetThumb(a);
+        const search = [a.name, a.id, cat.name, p.name, ...a.tags].join(' ').toLowerCase();
+        html.push(`<div class="card" draggable="true" data-id="${esc(a.id)}" data-search="${esc(search)}" title="${esc(a.name)}（点击添加 / 拖拽放置）">` +
+          `<div class="thumb ${t ? 'ready' : ''}"><span class="emoji">${a.icon}</span><img alt="" src="${t}" /></div>` +
+          `<div class="card-name">${esc(a.name)}</div></div>`);
+      }
+      html.push('</div></details>');
+    }
+  }
+  lib.innerHTML = html.join('') || '<div class="empty">暂无资产</div>';
+  filterLibrary();
+}
+function filterLibrary(): void {
+  const q = $in('libSearch').value.trim().toLowerCase();
+  $('lib').querySelectorAll<HTMLElement>('.lib-sec').forEach(sec => {
+    let any = 0;
+    sec.querySelectorAll<HTMLElement>('.card').forEach(c => {
+      const ok = !q || c.dataset.search!.includes(q);
+      c.style.display = ok ? '' : 'none';
+      any += +ok;
+    });
+    sec.style.display = any ? '' : 'none';
+    if (q) (sec as HTMLDetailsElement).open = true;
+  });
+}
+$('lib').addEventListener('click', e => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>('.card');
+  if (card) addAsset(card.dataset.id!, orbit.target.x, orbit.target.z);
+});
+$('lib').addEventListener('dragstart', e => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>('.card');
+  if (!card || !e.dataTransfer) return;
+  e.dataTransfer!.setData('text/plain', 'asset:' + card.dataset.id);
+  e.dataTransfer!.effectAllowed = 'copy';
+});
+$in('libSearch').addEventListener('input', filterLibrary);
+$<HTMLSelectElement>('libPack').addEventListener('change', e => { libPack = (e.target as HTMLSelectElement).value; buildLibrary(); });
+
+/** 逐个渲染程序化资产的缩略图（不阻塞界面） */
+async function generateThumbnails(): Promise<void> {
+  for (const def of registry.all()) {
+    if (def.source !== 'procedural' || thumbCache.has(def.id)) continue;
+    const obj = def.build(def.color);
+    thumbCache.set(def.id, renderThumbnail(obj));
+    disposeObject(obj);
+    document.querySelectorAll<HTMLElement>(`.card[data-id="${CSS.escape(def.id)}"] .thumb`).forEach(t => {
+      t.querySelector('img')!.src = thumbCache.get(def.id)!;
+      t.classList.add('ready');
+    });
+    await new Promise(res => setTimeout(res, 0));
+  }
+  assetManager?.refresh();
+}
+
 // ---------- 提示 ----------
-function toast(msg, type = 'info') {
+function toast(msg: string, type: 'info' | 'ok' | 'warn' = 'info'): void {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
   el.textContent = msg;
   $('toasts').appendChild(el);
-  setTimeout(() => el.classList.add('out'), 2200);
-  setTimeout(() => el.remove(), 2700);
+  setTimeout(() => el.classList.add('out'), 2600);
+  setTimeout(() => el.remove(), 3100);
 }
 
 // ---------- 场景切换 / 保存 / 导入导出 ----------
-const STORE_KEY = 'factoryforge-layout-v3';
-function loadScene(key) {
-  const s = SCENES[key];
+const STORE_KEY = 'factoryforge-layout-v4';
+function reportMissing(missing: number, verb: string): void {
+  toast(missing ? `${verb}，${missing} 个物体的资产缺失（以占位框显示）` : `${verb} ✓`, missing ? 'warn' : 'ok');
+}
+function countMissing(): number {
+  let n = 0;
+  const walk = (o: Obj) => { if (o.userData.isGroup) o.children.forEach(walk); else if (o.userData.missingType) n++; };
+  objects.forEach(walk);
+  return n;
+}
+function loadScene(id: string): void {
+  const s = registry.scene(id);
   if (!s) return;
-  const missing = loadData(s.build());
-  if (missing) toast(`${missing} 个物体无法还原`, 'warn');
+  loadData(s.build());
   setView('persp');
   camTween = null;
+  const m = countMissing();
+  if (m) toast(`${m} 个物体的资产缺失`, 'warn');
 }
-const sceneSelect = $('sceneSelect');
-sceneSelect.innerHTML = Object.entries(SCENES).map(([k, s]) => `<option value="${k}">${s.name}</option>`).join('');
+const sceneSelect = $<HTMLSelectElement>('sceneSelect');
+function buildSceneSelect(): void {
+  sceneSelect.innerHTML = registry.packs().filter(p => registry.scenes().some(s => s.packId === p.id))
+    .map(p => `<optgroup label="${esc(p.name)}">${registry.scenes().filter(s => s.packId === p.id).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</optgroup>`).join('');
+}
 sceneSelect.addEventListener('change', () => {
   if (history.index > 0 && !confirm('切换场景会替换当前内容（未保存的修改将丢失），确定吗？')) {
-    sceneSelect.value = sceneSelect.dataset.current;
+    sceneSelect.value = sceneSelect.dataset.current!;
     return;
   }
   sceneSelect.dataset.current = sceneSelect.value;
   loadScene(sceneSelect.value);
-  toast(`已加载：${SCENES[sceneSelect.value].name}`);
+  toast(`已加载：${registry.scene(sceneSelect.value)?.name}`);
 });
 
-function saveLocal() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(serialize())); toast('已保存到浏览器 ✓', 'ok'); }
-  catch (e) { toast('保存失败：' + e.message, 'warn'); }
+/** 场景中用到的用户资产 ID */
+function usedUserAssets(data: LayoutData): string[] {
+  return [...walkComponents(data.objects)].map(c => registry.resolveId(c.type) ?? c.type).filter(id => id.startsWith('user/'));
+}
+function saveLocal(): void {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(serialize()));
+    toast('已保存到浏览器 ✓（自定义模型保存在本机资产库）', 'ok');
+  } catch (e) {
+    toast('保存失败：' + (e as Error).message, 'warn');
+  }
 }
 $('btnSave').onclick = saveLocal;
 $('btnLoad').onclick = () => {
-  const raw = localStorage.getItem(STORE_KEY);
+  const raw = localStorage.getItem(STORE_KEY) ?? localStorage.getItem('factoryforge-layout-v3');
   if (!raw) return toast('浏览器中没有已保存的布局', 'warn');
-  const missing = loadData(JSON.parse(raw));
-  toast(missing ? `已读取，${missing} 个自定义模型需重新导入` : '已读取布局 ✓', missing ? 'warn' : 'ok');
+  loadData(JSON.parse(raw));
+  reportMissing(countMissing(), '已读取布局');
 };
-function download(name, url) {
+function download(name: string, url: string): void {
   const a = document.createElement('a');
-  a.href = url; a.download = name; a.click();
+  a.href = url;
+  a.download = name;
+  a.click();
 }
-$('btnExport').onclick = () => {
-  const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: 'application/json' });
+function downloadBlob(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
-  download(`${env.name || 'factory'}.json`, url);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
-$('btnImport').onclick = () => $('fileInput').click();
-$('fileInput').onchange = (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  file.text().then(txt => {
-    const missing = loadData(JSON.parse(txt));
-    toast(missing ? `已导入，${missing} 个物体无法还原（自定义模型需重新导入）` : '导入成功 ✓', missing ? 'warn' : 'ok');
-  }).catch(err => toast('导入失败：' + err.message, 'warn'));
+  download(name, url);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+/** 导出项目包：布局 + 用到的自定义模型 */
+async function exportProject(): Promise<void> {
+  const layout = serialize();
+  const bundle: ProjectBundle = { app: 'FactoryForge', format: 'project', version: 4, layout, assets: await userLib.packAssets(usedUserAssets(layout)) };
+  downloadBlob(`${env.name || 'factory'}.ffproj.json`, new Blob([JSON.stringify(bundle)], { type: 'application/json' }));
+  toast(bundle.assets.length ? `已导出项目包（含 ${bundle.assets.length} 个自定义模型）` : '已导出项目包', 'ok');
+}
+async function importProjectText(txt: string): Promise<void> {
+  const data = JSON.parse(txt);
+  let layout: LayoutData = data;
+  let added = 0;
+  if (data?.format === 'project') {
+    added = await userLib.unpackAssets((data as ProjectBundle).assets || []);
+    layout = (data as ProjectBundle).layout;
+  }
+  loadData(layout);
+  reportMissing(countMissing(), added ? `已导入（新增 ${added} 个自定义模型）` : '已导入');
+}
+$('btnExport').onclick = () => { exportProject().catch(e => toast('导出失败：' + e.message, 'warn')); };
+$('btnImport').onclick = () => $in('fileInput').click();
+$in('fileInput').onchange = e => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (file) file.text().then(importProjectText).catch(err => toast('导入失败：' + err.message, 'warn'));
 };
 $('btnShot').onclick = () => {
-  const hidden = [transform, grid, ...selection.map(o => o.userData.outline)].filter(Boolean);
+  const hidden = [transform, grid, ...selection.map(o => o.userData.outline)].filter(Boolean) as Obj[];
   const prev = hidden.map(h => h.visible);
   hidden.forEach(h => (h.visible = false));
   renderer.render(scene, camera);
   download(`${env.name || 'factory'}.png`, canvas.toDataURL('image/png'));
   hidden.forEach((h, i) => (h.visible = prev[i]));
+  invalidate();
   toast('截图已导出 ✓', 'ok');
 };
 
-// GLB 导入
-const gltfLoader = new GLTFLoader();
-$('btnImportGlb').onclick = () => $('glbInput').click();
-$('glbInput').onchange = (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  const url = URL.createObjectURL(file);
-  toast('正在加载模型…');
-  gltfLoader.load(url, (gltf) => {
-    URL.revokeObjectURL(url);
-    const model = gltf.scene;
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    model.scale.setScalar(4 / (Math.max(size.x, size.y, size.z) || 1));
-    box.setFromObject(model);
-    const c = box.getCenter(new THREE.Vector3());
-    model.position.sub(new THREE.Vector3(c.x, box.min.y, c.z));
-    model.traverse(n => { if (n.isMesh) n.castShadow = n.receiveShadow = true; });
-    const ref = 'glb-' + Date.now();
-    customModels.set(ref, { name: file.name.replace(/\.(glb|gltf)$/i, ''), model });
-    const obj = createFromData({ kind: 'custom', ref, position: [snapV(orbit.target.x), 0, snapV(orbit.target.z)] });
-    addToScene(obj);
-    select([obj]);
-    pushHistory();
-    toast('模型已导入 ✓（导出 JSON 时不包含模型文件本身）', 'ok');
-  }, undefined, (err) => { URL.revokeObjectURL(url); console.error(err); toast('模型加载失败', 'warn'); });
-};
+// ---------- 用户资产库 + 资产管理器 ----------
+let store: AssetStore;
+try { store = new IdbAssetStore(); } catch { store = new MemoryAssetStore(); }
+const userLib = new UserAssetLibrary(store, registry);
+let assetManager: AssetManagerUI | null = null;
+userLib.onAssetChanged(id => {
+  const n = rebuildInstances(id);
+  if (n) toast(`已更新场景中的 ${n} 个实例`, 'ok');
+});
+registry.onChange(() => {
+  buildLibrary();
+  assetManager?.refresh();
+  refreshAll();
+});
+$('btnAssets').onclick = () => assetManager?.open();
+$('btnImportGlb').onclick = () => assetManager?.open({ importNow: true });
 
 // ---------- 面板 / 帮助 ----------
-$('btnToggleLeft').onclick = () => document.body.classList.toggle('hide-left');
-$('btnToggleRight').onclick = () => document.body.classList.toggle('hide-right');
-const toggleHelp = (show) => $('helpModal').classList.toggle('hidden', !show);
+$('btnToggleLeft').onclick = () => { document.body.classList.toggle('hide-left'); };
+$('btnToggleRight').onclick = () => { document.body.classList.toggle('hide-right'); };
+const toggleHelp = (show: boolean) => $('helpModal').classList.toggle('hidden', !show);
 $('btnHelp').onclick = () => toggleHelp(true);
 $('btnHelpClose').onclick = () => toggleHelp(false);
-$('helpModal').addEventListener('click', (e) => { if (e.target.id === 'helpModal') toggleHelp(false); });
+$('helpModal').addEventListener('click', e => { if ((e.target as HTMLElement).id === 'helpModal') toggleHelp(false); });
 
 // ---------- 键盘 ----------
-window.addEventListener('keydown', (e) => {
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+window.addEventListener('keydown', e => {
+  const tgt = e.target as HTMLElement;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(tgt.tagName) || tgt.closest('.modal:not(.hidden)')) return;
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); return undo(); }
   if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); return redo(); }
@@ -1024,9 +1153,9 @@ window.addEventListener('keydown', (e) => {
   if (k.startsWith('arrow') && selection.length) {
     e.preventDefault();
     const step = (e.shiftKey ? 5 : 1) * (snapOn ? 1 : 0.5);
-    const d = { arrowleft: ['x', -1], arrowright: ['x', 1], arrowup: ['z', -1], arrowdown: ['z', 1] }[k];
-    const tgt = multiProxy || (selection[0].userData.locked ? null : selection[0]);
-    if (tgt) { tgt.position[d[0]] += d[1] * step; syncInspector(); pushHistorySoon(); }
+    const d = ({ arrowleft: ['x', -1], arrowright: ['x', 1], arrowup: ['z', -1], arrowdown: ['z', 1] } as Record<string, ['x' | 'z', number]>)[k];
+    const tgtObj = multiProxy || (selection[0].userData.locked ? null : selection[0]);
+    if (tgtObj && d) { tgtObj.position[d[0]] += d[1] * step; syncInspector(); pushHistorySoon(); }
     return;
   }
   switch (k) {
@@ -1036,7 +1165,7 @@ window.addEventListener('keydown', (e) => {
     case 'q': toggleSpace(); break;
     case 's': toggleSnap(); break;
     case 'f': focusSelection(); break;
-    case 'g': e.shiftKey ? ungroupSelected() : groupSelected(); break;
+    case 'g': if (e.shiftKey) ungroupSelected(); else groupSelected(); break;
     case 'h': if (selection.length) setHidden(selection, selection[0].visible); break;
     case 'l': if (selection.length) setLocked(selection, !selection[0].userData.locked); break;
     case 'v': setView(currentView === 'top' ? 'persp' : 'top'); break;
@@ -1044,6 +1173,7 @@ window.addEventListener('keydown', (e) => {
     case '2': setView('top'); break;
     case '3': setView('front'); break;
     case '4': setView('side'); break;
+    case 'm': assetManager?.open(); break;
     case ' ': e.preventDefault(); toggleAnim(); break;
     case 'delete': case 'backspace': deleteSelected(); break;
     case 'escape': toggleHelp(false); select([]); break;
@@ -1051,30 +1181,45 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------- 渲染循环 ----------
-function resize() {
+// ---------- 渲染循环（按需渲染：仅在相机/场景变化或动画播放时绘制） ----------
+function resize(): void {
   const w = viewport.clientWidth, h = viewport.clientHeight;
   if (!w || !h) return;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  invalidate();
 }
 new ResizeObserver(resize).observe(viewport);
 
 const clock = new THREE.Clock();
-let animTime = 0, fpsFrames = 0, fpsTime = 0;
-function animateNode(o, t, dt) {
-  if (!o.visible) return;
-  if (o.userData.isGroup) o.children.forEach(c => animateNode(c, t, dt));
-  else if (o.userData.factoryType) animateAsset(o, t, dt);
+let animTime = 0, fpsFrames = 0, fpsTime = 0, frames = 0;
+function animateNode(o: Obj, t: number, dt: number): boolean {
+  if (!o.visible) return false;
+  if (o.userData.isGroup) {
+    let any = false;
+    for (const c of o.children) any = animateNode(c, t, dt) || any;
+    return any;
+  }
+  const def = defOf(o);
+  if (def?.animate && o.userData.parts) {
+    def.animate(o.userData.parts, t, dt);
+    return true;
+  }
+  return false;
 }
-function loop() {
+function loop(): void {
   requestAnimationFrame(loop);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const raw = clock.getDelta();
+  const dt = Math.min(raw, 0.05);
   if (animOn) {
     animTime += dt;
-    for (const o of objects) animateNode(o, animTime, dt);
-    if (selection.length) updateOutlines();
+    let any = false;
+    for (const o of objects) any = animateNode(o, animTime, dt) || any;
+    if (any) {
+      needsRender = true;
+      if (selection.length) updateOutlines();
+    }
   }
   if (camTween) {
     camTween.k = Math.min(1, camTween.k + dt / camTween.dur);
@@ -1082,22 +1227,57 @@ function loop() {
     camera.position.lerpVectors(camTween.p0, camTween.p1, e);
     orbit.target.lerpVectors(camTween.t0, camTween.t1, e);
     if (camTween.k >= 1) camTween = null;
+    needsRender = true;
   }
-  orbit.update();
-  renderer.render(scene, camera);
-  fpsFrames++; fpsTime += dt;
-  if (fpsTime >= 1) { $('stFps').textContent = `${Math.round(fpsFrames / fpsTime)} FPS`; fpsFrames = 0; fpsTime = 0; }
+  orbit.update(); // 阻尼期间会触发 change → invalidate
+  fpsTime += raw;
+  if (needsRender) {
+    needsRender = false;
+    renderer.render(scene, camera);
+    fpsFrames++;
+    frames++;
+    $('stDraws').textContent = `绘制 ${renderer.info.render.calls} · ${(renderer.info.render.triangles / 1000).toFixed(0)}k 面`;
+  }
+  if (fpsTime >= 1) {
+    $('stFps').textContent = fpsFrames ? `${Math.round(fpsFrames / fpsTime)} FPS` : '空闲';
+    fpsFrames = 0;
+    fpsTime = 0;
+  }
 }
 
 // ---------- 启动 ----------
-window.addEventListener('error', (e) => toast('出错：' + e.message, 'warn'));
-buildLibrary();
-resize();
-sceneSelect.value = sceneSelect.dataset.current = 'shipyard';
-loadScene('shipyard');
-loop();
-$('loading').classList.add('hidden');
-window.__ffReady = true;
-setTimeout(generateThumbnails, 300);
+export async function start(): Promise<void> {
+  window.addEventListener('error', e => toast('出错：' + e.message, 'warn'));
+  const errs = await userLib.init().catch(e => [String(e)]);
+  if (errs.length) toast(`${errs.length} 个自定义模型载入失败`, 'warn');
+  assetManager = new AssetManagerUI({
+    registry, lib: userLib, usageOf, toast, downloadBlob,
+    place: id => { addAsset(id, orbit.target.x, orbit.target.z); },
+    procThumb: id => thumbCache.get(id) ?? '',
+  });
+  buildLibrary();
+  buildSceneSelect();
+  resize();
+  const q = new URLSearchParams(location.search).get('scene');
+  const first = (q && registry.scene(q)) || registry.scenes()[0];
+  if (first) {
+    sceneSelect.value = sceneSelect.dataset.current = first.id;
+    loadScene(first.id);
+  }
+  if (new URLSearchParams(location.search).has('noanim')) toggleAnim();
+  loop();
+  $('loading').classList.add('hidden');
+  (window as unknown as { __ffReady: boolean }).__ffReady = true;
+  setTimeout(() => { generateThumbnails(); }, 300);
+}
+
 // 调试 / 自动化测试入口
-window.__ff = { THREE, scene, camera, objects, get selection() { return selection; }, select, serialize, loadData, undo, redo, addAsset, groupSelected, ungroupSelected, duplicateSelected, deleteSelected, alignSelected, history };
+Object.assign(window, {
+  __ff: {
+    THREE, scene, camera, registry, userLib, objects, renderer, planStats,
+    get selection() { return selection; },
+    get frames() { return frames; },
+    select, serialize, loadData, undo, redo, addAsset, groupSelected, ungroupSelected,
+    duplicateSelected, deleteSelected, alignSelected, history, usageOf, rebuildInstances, exportProject, importProjectText,
+  },
+});

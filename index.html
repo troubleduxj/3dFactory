@@ -4,12 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FactoryForge · 3D 工厂编辑器</title>
-  <link rel="stylesheet" href="./css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%E2%AC%A2%3C/text%3E%3C/svg%3E" />
 </head>
 <body>
   <!-- 顶部栏 -->
   <header id="topbar">
-    <div class="brand"><span class="logo">⬢</span><b>FactoryForge</b><span class="sub">3D 工厂编辑器</span></div>
+    <div class="brand"><span class="logo">⬢</span><b>FactoryForge</b><span class="sub">3D 数字孪生编辑器</span></div>
     <div class="tb-group">
       <button class="icon-btn" id="btnToggleLeft" title="显示/隐藏素材面板">◧</button>
       <label class="scene-pick">场景
@@ -23,15 +23,16 @@
       <span class="sep"></span>
       <button class="tb-btn" id="btnSave" title="保存到浏览器 (Ctrl+S)">💾 保存</button>
       <button class="tb-btn" id="btnLoad" title="从浏览器读取">📂 读取</button>
-      <button class="tb-btn" id="btnExport" title="导出 JSON 文件">⬇ 导出</button>
-      <button class="tb-btn" id="btnImport" title="导入 JSON 文件">⬆ 导入</button>
+      <button class="tb-btn" id="btnExport" title="导出项目包（布局 + 用到的自定义模型）">⬇ 导出</button>
+      <button class="tb-btn" id="btnImport" title="导入项目包或布局 JSON">⬆ 导入</button>
+      <span class="sep"></span>
+      <button class="tb-btn" id="btnAssets" title="3D 资产管理 (M)">🗂 资产管理</button>
       <button class="tb-btn" id="btnShot" title="导出截图 PNG">📷 截图</button>
       <span class="sep"></span>
       <button class="icon-btn" id="btnHelp" title="快捷键帮助 (?)">?</button>
       <button class="icon-btn" id="btnToggleRight" title="显示/隐藏属性面板">◨</button>
     </div>
     <input type="file" id="fileInput" accept="application/json,.json" hidden />
-    <input type="file" id="glbInput" accept=".glb,.gltf" hidden />
   </header>
 
   <main id="main">
@@ -42,11 +43,14 @@
         <button class="tab" data-tab="outliner">场景大纲 <span class="badge" id="objCountBadge">0</span></button>
       </div>
       <div class="tab-body" id="tab-library">
-        <div class="search"><input type="search" id="libSearch" placeholder="搜索素材，如：起重机 / 船" /></div>
+        <div class="search lib-filter">
+          <select id="libPack" title="按资产包筛选"></select>
+          <input type="search" id="libSearch" placeholder="搜索素材，如：起重机 / 船" />
+        </div>
         <div class="lib-scroll" id="lib"></div>
         <div class="panel-foot">
-          <button class="wide-btn" id="btnImportGlb">⬆ 导入 .glb / .gltf 模型</button>
-          <div class="foot-tip">点击素材添加到视图中心，或直接拖拽到场景地面</div>
+          <button class="wide-btn" id="btnImportGlb">⬆ 导入 .glb / .gltf 到我的资产</button>
+          <div class="foot-tip">点击添加到视图中心，或拖拽到地面；按 M 打开资产管理</div>
         </div>
       </div>
       <div class="tab-body hidden" id="tab-outliner">
@@ -86,7 +90,7 @@
 
       <div id="loading">
         <div class="spinner"></div>
-        <div>正在加载 3D 引擎…</div>
+        <div>正在加载…</div>
         <div class="load-tip" id="loadTip"></div>
       </div>
     </section>
@@ -104,6 +108,7 @@
     <span id="stCursor">X 0.0 · Z 0.0</span>
     <span class="grow"></span>
     <span id="stHint">左键选择 · Shift 多选 · 右键平移 · 滚轮缩放</span>
+    <span id="stDraws">绘制 --</span>
     <span id="stFps">-- FPS</span>
   </footer>
 
@@ -128,26 +133,12 @@
         <div><kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销 · <kbd>Ctrl</kbd>+<kbd>Y</kbd> 重做</div>
         <div><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存</div>
         <div><kbd>空格</kbd> 播放 / 暂停动画</div>
+        <div><kbd>M</kbd> 资产管理</div>
         <div><kbd>Esc</kbd> 取消选择</div>
       </div>
     </div>
   </div>
 
-  <script>
-    // CDN 加载失败提示
-    setTimeout(function () {
-      if (!window.__ffReady) document.getElementById('loadTip').textContent =
-        '加载时间较长：请确认网络可访问 cdn.jsdelivr.net，并通过 http 服务打开（不要直接双击 html 文件）。';
-    }, 8000);
-  </script>
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-    }
-  }
-  </script>
-  <script type="module" src="./js/main.js"></script>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
