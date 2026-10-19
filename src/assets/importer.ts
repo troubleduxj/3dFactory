@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { ImportOptions, ModelStats, Vec3 } from '../core/types';
 import { renderThumbnail } from '../core/thumbs';
-import { assertSelfContained, isAllowedResourceUrl } from './gltf-check';
+import { assertSelfContained, blockExternalUrl } from './gltf-check';
 
 /**
  * GLB / glTF 导入处理：单位换算、坐标轴、原点，并统计模型信息。
@@ -26,10 +26,7 @@ export interface ProcessedModel {
 
 // 纵深防御：加载器发起的所有请求都经过 URL 修改器，只放行 data: / blob:（GLB 内嵌图片由 GLTFLoader 生成 blob: URL）
 const manager = new THREE.LoadingManager();
-manager.setURLModifier(url => {
-  if (isAllowedResourceUrl(url)) return url;
-  throw new Error('已阻止外部资源请求：' + url);
-});
+manager.setURLModifier(blockExternalUrl);
 const loader = new GLTFLoader(manager);
 
 export function parseModel(data: ArrayBuffer): Promise<THREE.Group> {
