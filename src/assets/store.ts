@@ -22,38 +22,74 @@ function req<T>(r: IDBRequest<T>): Promise<T> {
 }
 
 export class IdbAssetStore implements AssetStore {
-  private db: Promise<IDBDatabase>;
+  private constructor(private db: IDBDatabase) {}
 
-  constructor(factory: IDBFactory = globalThis.indexedDB, dbName = DB_NAME) {
-    this.db = new Promise((resolve, reject) => {
-      if (!factory) return reject(new Error('当前环境不支持 IndexedDB'));
-      const open = factory.open(dbName, 1);
+  /** 打开（或创建）数据库；IndexedDB 不可用 / 被禁用 / 打开失败时 reject */
+  static open(factory?: IDBFactory, dbName = DB_NAME): Promise<IdbAssetStore> {
+    return new Promise((resolve, reject) => {
+      let f: IDBFactory | undefined;
+      // 沙箱 iframe 等环境中访问 indexedDB 本身会抛 SecurityError
+      try { f = factory === undefined ? globalThis.indexedDB : factory; } catch (e) { return reject(e); }
+      if (!f) return reject(new Error('当前环境不支持 IndexedDB'));
+      let open: IDBOpenDBRequest;
+      try { open = f.open(dbName, 1); } catch (e) { return reject(e); }
       open.onupgradeneeded = () => {
         if (!open.result.objectStoreNames.contains(STORE)) open.result.createObjectStore(STORE, { keyPath: 'id' });
       };
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(open.error);
+      open.onsuccess = () => resolve(new IdbAssetStore(open.result));
+      open.onerror = () => reject(open.error ?? new Error('无法打开资产库'));
     });
   }
-  private async tx(mode: IDBTransactionMode): Promise<IDBObjectStore> {
-    return (await this.db).transaction(STORE, mode).objectStore(STORE);
+  private store(mode: IDBTransactionMode): IDBObjectStore {
+    return this.db.transaction(STORE, mode).objectStore(STORE);
   }
   async list(): Promise<UserAssetRecord[]> {
-    const all = await req((await this.tx('readonly')).getAll() as IDBRequest<UserAssetRecord[]>);
+    const all = await req(this.store('readonly').getAll() as IDBRequest<UserAssetRecord[]>);
     return all.sort((a, b) => a.createdAt - b.createdAt);
   }
   async get(id: string): Promise<UserAssetRecord | undefined> {
-    return req((await this.tx('readonly')).get(id) as IDBRequest<UserAssetRecord | undefined>);
+    return req(this.store('readonly').get(id) as IDBRequest<UserAssetRecord | undefined>);
   }
-  async put(rec: UserAssetRecord): Promise<void> {
-    await req((await this.tx('readwrite')).put(rec));
+  put(rec: UserAssetRecord): Promise<void> {
+    return this.write(s => s.put(rec));
   }
-  async remove(id: string): Promise<void> {
-    await req((await this.tx('readwrite')).delete(id));
+  remove(id: string): Promise<void> {
+    return this.write(s => s.delete(id));
+  }
+  /** 写操作：等待事务提交完成；事务中止（如配额不足）或出错时 reject，避免假成功 */
+  private write(fn: (s: IDBObjectStore) => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let tx: IDBTransaction;
+      try {
+        tx = this.db.transaction(STORE, 'readwrite');
+        // 事件异步派发，同步绑定即可保证不漏掉
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(txError(tx));
+        tx.onerror = () => reject(txError(tx)); // 随后还会触发 abort，重复 reject 无害
+        fn(tx.objectStore(STORE));
+      } catch (e) {
+        reject(e);
+      }
+    });
   }
 }
 
-/** 内存实现：IndexedDB 不可用（如隐私模式）时的降级方案 */
+function txError(tx: IDBTransaction): Error {
+  const e = tx.error;
+  if (e?.name === 'QuotaExceededError') return new Error('浏览器存储空间不足，资产未保存');
+  return new Error(e?.message || '写入资产库失败');
+}
+
+/** 打开持久化资产库；失败时降级为内存实现（persistent = false），不会 reject */
+export async function openAssetStore(factory?: IDBFactory): Promise<{ store: AssetStore; persistent: boolean; error?: Error }> {
+  try {
+    return { store: await IdbAssetStore.open(factory), persistent: true };
+  } catch (e) {
+    return { store: new MemoryAssetStore(), persistent: false, error: e instanceof Error ? e : new Error(String(e)) };
+  }
+}
+
+/** 内存实现：IndexedDB 不可用（如隐私模式）时的降级方案（数据不会持久化） */
 export class MemoryAssetStore implements AssetStore {
   private m = new Map<string, UserAssetRecord>();
   async list() { return [...this.m.values()].sort((a, b) => a.createdAt - b.createdAt); }

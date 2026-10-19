@@ -9,7 +9,7 @@ import { renderThumbnail } from './core/thumbs';
 import { esc } from './core/html';
 import { UserAssetLibrary } from './assets/library';
 import { safeThumbnail, validateLayout, validateProjectBundle } from './assets/validate';
-import { IdbAssetStore, MemoryAssetStore, type AssetStore } from './assets/store';
+import { openAssetStore } from './assets/store';
 import { AssetManagerUI } from './assets/manager-ui';
 import { BUILTIN_PACKS } from './packs/index';
 
@@ -1081,7 +1081,7 @@ function downloadBlob(name: string, blob: Blob): void {
 /** 导出项目包：布局 + 用到的自定义模型 */
 async function exportProject(): Promise<void> {
   const layout = serialize();
-  const bundle: ProjectBundle = { app: 'FactoryForge', format: 'project', version: 4, layout, assets: await userLib.packAssets(usedUserAssets(layout)) };
+  const bundle: ProjectBundle = { app: 'FactoryForge', format: 'project', version: 4, layout, assets: await lib().packAssets(usedUserAssets(layout)) };
   downloadBlob(`${env.name || 'factory'}.ffproj.json`, new Blob([JSON.stringify(bundle)], { type: 'application/json' }));
   toast(bundle.assets.length ? `已导出项目包（含 ${bundle.assets.length} 个自定义模型）` : '已导出项目包', 'ok');
 }
@@ -1093,7 +1093,7 @@ async function importProjectText(txt: string): Promise<void> {
   if ((data as { format?: unknown } | null)?.format === 'project') {
     const bundle = validateProjectBundle(data); // 先校验布局，失败时什么都不写
     layout = bundle.layout;
-    added = await userLib.unpackAssets(bundle.assets); // 任一资产无效 → 整体拒绝，未写库
+    added = await lib().unpackAssets(bundle.assets); // 任一资产无效 → 整体拒绝，未写库
   } else {
     layout = validateLayout(data);
   }
@@ -1120,14 +1120,14 @@ $('btnShot').onclick = () => {
 };
 
 // ---------- 用户资产库 + 资产管理器 ----------
-let store: AssetStore;
-try { store = new IdbAssetStore(); } catch { store = new MemoryAssetStore(); }
-const userLib = new UserAssetLibrary(store, registry);
+// 资产库在 start() 中异步打开（IndexedDB 不可用时降级为内存库）
+let userLib: UserAssetLibrary | null = null;
+/** 就绪前调用会抛错（由调用方 toast 提示） */
+function lib(): UserAssetLibrary {
+  if (!userLib) throw new Error('资产库尚未就绪，请稍候');
+  return userLib;
+}
 let assetManager: AssetManagerUI | null = null;
-userLib.onAssetChanged(id => {
-  const n = rebuildInstances(id);
-  if (n) toast(`已更新场景中的 ${n} 个实例`, 'ok');
-});
 registry.onChange(() => {
   buildLibrary();
   assetManager?.refresh();
@@ -1253,10 +1253,20 @@ function loop(): void {
 // ---------- 启动 ----------
 export async function start(): Promise<void> {
   window.addEventListener('error', e => toast('出错：' + e.message, 'warn'));
-  const errs = await userLib.init().catch(e => [String(e)]);
+  const opened = await openAssetStore();
+  if (!opened.persistent) {
+    console.warn('IndexedDB 不可用，改用内存资产库', opened.error);
+    toast('资产库不可用（浏览器禁用了本地存储），导入的模型不会保存', 'warn');
+  }
+  const ul = (userLib = new UserAssetLibrary(opened.store, registry));
+  ul.onAssetChanged(id => {
+    const n = rebuildInstances(id);
+    if (n) toast(`已更新场景中的 ${n} 个实例`, 'ok');
+  });
+  const errs = await ul.init().catch(e => [String(e)]);
   if (errs.length) toast(`${errs.length} 个自定义模型载入失败`, 'warn');
   assetManager = new AssetManagerUI({
-    registry, lib: userLib, usageOf, toast, downloadBlob,
+    registry, lib: ul, usageOf, toast, downloadBlob,
     place: id => { addAsset(id, orbit.target.x, orbit.target.z); },
     procThumb: id => thumbCache.get(id) ?? '',
   });
@@ -1279,7 +1289,8 @@ export async function start(): Promise<void> {
 // 调试 / 自动化测试入口
 Object.assign(window, {
   __ff: {
-    THREE, scene, camera, registry, userLib, objects, renderer, planStats,
+    THREE, scene, camera, registry, objects, renderer, planStats,
+    get userLib() { return userLib; },
     get selection() { return selection; },
     get frames() { return frames; },
     select, serialize, loadData, undo, redo, addAsset, groupSelected, ungroupSelected,
