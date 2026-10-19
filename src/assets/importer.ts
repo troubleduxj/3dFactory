@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { ImportOptions, ModelStats, Vec3 } from '../core/types';
 import { renderThumbnail } from '../core/thumbs';
+import { assertSelfContained, isAllowedResourceUrl } from './gltf-check';
 
 /**
  * GLB / glTF 导入处理：单位换算、坐标轴、原点，并统计模型信息。
- * 仅支持自包含文件（.glb，或资源以 data URI 内嵌的 .gltf）；外链贴图的 .gltf 请先打包成 .glb。
+ * 仅支持自包含文件（.glb，或资源以 data URI 内嵌的 .gltf）；引用外部资源（http / 相对路径）的文件在解析前即被拒绝，
+ * 不会发起任何网络请求。外链贴图的 .gltf 请先打包成 .glb。
  */
 export const UNIT_OPTIONS: { label: string; value: number }[] = [
   { label: '米 (m)', value: 1 },
@@ -22,9 +24,20 @@ export interface ProcessedModel {
   stats: ModelStats;
 }
 
-const loader = new GLTFLoader();
+// 纵深防御：加载器发起的所有请求都经过 URL 修改器，只放行 data: / blob:（GLB 内嵌图片由 GLTFLoader 生成 blob: URL）
+const manager = new THREE.LoadingManager();
+manager.setURLModifier(url => {
+  if (isAllowedResourceUrl(url)) return url;
+  throw new Error('已阻止外部资源请求：' + url);
+});
+const loader = new GLTFLoader(manager);
 
 export function parseModel(data: ArrayBuffer): Promise<THREE.Group> {
+  try {
+    assertSelfContained(data);
+  } catch (e) {
+    return Promise.reject(e);
+  }
   return new Promise((resolve, reject) => {
     loader.parse(data.slice(0), '', gltf => resolve(gltf.scene), err => reject(err instanceof Error ? err : new Error(String(err))));
   });
