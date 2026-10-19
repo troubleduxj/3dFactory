@@ -24,7 +24,7 @@
 | 撤销用整份快照 | 场景大时变慢 | 2（命令模式） |
 | 动画是假的 | 正弦函数驱动 | 3（数据驱动） |
 
-## 阶段 1：工程化（本次进行中）
+## 阶段 1：工程化（已完成）
 
 - TypeScript + Vite，three.js 用 npm 固定版本（0.160.0），去掉 CDN，构建产物可直接离线部署
 - 资产包架构：`AssetPack { id, name, industry, categories, assets, scenes }`，资产 ID 带命名空间（`shipyard/drydock`），旧布局文件的旧 ID 自动映射
