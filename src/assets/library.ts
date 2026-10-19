@@ -4,6 +4,13 @@ import type { AssetRegistry } from '../core/registry';
 import { invalidatePlan } from '../core/optimize';
 import { type AssetStore, base64ToBuffer, bufferToBase64, metaOf } from './store';
 import { DEFAULT_IMPORT, guessName, parseModel, processModel, thumbnailOf } from './importer';
+import { safeThumbnail, validateBundleAsset } from './validate';
+
+/** 错误提示中用于标识资产的简短文字 */
+const idLabel = (raw: unknown): string => {
+  const id = (raw as { id?: unknown } | null)?.id;
+  return typeof id === 'string' ? id.slice(0, 60) : '（无 ID）';
+};
 
 export interface ImportRequest {
   file: { name: string; size: number; data: ArrayBuffer };
@@ -141,20 +148,39 @@ export class UserAssetLibrary {
     return out;
   }
 
-  /** 项目包：导入资产。已存在且版本不低于包内版本时保留本地版本；返回导入数量 */
-  async unpackAssets(list: ProjectBundle['assets']): Promise<number> {
-    let n = 0;
-    for (const a of list) {
-      const local = this.metas.get(a.id);
-      if (local && local.version >= a.version) continue;
-      const { dataBase64, ...meta } = a;
-      const rec: UserAssetRecord = { ...meta, data: base64ToBuffer(dataBase64) };
-      await this.store.put(rec);
-      await this.load(rec);
-      this.notify(a.id); // 更新旧版本实例 / 恢复占位框
-      n++;
+  /**
+   * 项目包：导入资产。已存在且版本不低于包内版本时保留本地版本；返回导入数量。
+   * 先校验并解析全部资产，任一不合格则整体拒绝且不写库；全部通过后才写库并注册。
+   */
+  async unpackAssets(list: unknown): Promise<number> {
+    if (!Array.isArray(list)) throw new Error('项目包中的资产列表无效');
+    // 第一阶段：只校验和解析，不写库
+    const ready: { rec: UserAssetRecord; template: THREE.Group }[] = [];
+    const errors: string[] = [];
+    for (const raw of list) {
+      try {
+        const { asset, thumbnailOk } = validateBundleAsset(raw);
+        const local = this.metas.get(asset.id);
+        if (local && local.version >= asset.version) continue;
+        let data: ArrayBuffer;
+        try { data = base64ToBuffer(asset.dataBase64); } catch { throw new Error('模型数据不是有效的 base64'); }
+        const { template } = processModel(await parseModel(data), asset.import);
+        const { dataBase64: _b, ...meta } = asset;
+        // 缩略图不合法时丢弃，用解析出的模板重新生成
+        const rec: UserAssetRecord = { ...meta, thumbnail: thumbnailOk ? meta.thumbnail : thumbnailOf(template), data };
+        ready.push({ rec, template });
+      } catch (e) {
+        errors.push(`${idLabel(raw)}：${(e as Error).message}`);
+      }
     }
-    return n;
+    if (errors.length) throw new Error(`项目包包含 ${errors.length} 个无效资产，已拒绝导入：${errors.slice(0, 3).join('；')}`);
+    // 第二阶段：写库并注册（ID 已校验，register 不会因格式抛错）
+    for (const { rec, template } of ready) {
+      await this.store.put(rec);
+      this.register(rec, template);
+      this.notify(rec.id); // 更新旧版本实例 / 恢复占位框
+    }
+    return ready.length;
   }
 
   // ---------- 内部 ----------
@@ -176,7 +202,8 @@ export class UserAssetLibrary {
     const def: AssetDef = {
       id: meta.id, packId: 'user', key: meta.id.slice(5), source: 'user',
       name: meta.name, cat: meta.cat, icon: '🧊', color: '#ffffff', tags: meta.tags,
-      colorable: false, optimize: false, thumbnail: meta.thumbnail,
+      // 纵深防御：本地库中的旧记录也只接受 PNG data URI 缩略图
+      colorable: false, optimize: false, thumbnail: safeThumbnail(meta.thumbnail),
       build: () => {
         const g = new THREE.Group();
         g.add((this.templates.get(meta.id) ?? template).clone(true));

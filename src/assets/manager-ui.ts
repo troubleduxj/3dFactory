@@ -2,6 +2,7 @@ import type { AssetDef, ImportOptions, UserAssetMeta } from '../core/types';
 import type { AssetRegistry } from '../core/registry';
 import type { UserAssetLibrary } from './library';
 import { DEFAULT_IMPORT, UNIT_OPTIONS, formatBytes, guessName, parseModel, processModel, thumbnailOf } from './importer';
+import { esc } from '../core/html';
 
 /**
  * 3D 资产管理器（弹窗）：
@@ -20,7 +21,6 @@ export interface ManagerDeps {
   procThumb: (id: string) => string;
 }
 
-const esc = (s: unknown) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const fmtDate = (t: number) => new Date(t).toLocaleString();
 const pivotLabels: Record<ImportOptions['pivot'], string> = { 'bottom-center': '底部中心', center: '几何中心', keep: '保留原点' };
 
@@ -179,9 +179,9 @@ export class AssetManagerUI {
       const t = this.thumbOf(a);
       const meta = a.source === 'user' ? this.d.lib.meta(a.id) : undefined;
       return `<div class="am-item ${a.id === this.selectedId ? 'sel' : ''}" data-id="${esc(a.id)}" title="双击放置到场景">
-        <div class="thumb ${t ? 'ready' : ''}"><span class="emoji">${a.icon}</span><img alt="" src="${t}" /></div>
+        <div class="thumb ${t ? 'ready' : ''}"><span class="emoji">${esc(a.icon)}</span><img alt="" src="${esc(t)}" /></div>
         <div class="am-item-name">${esc(a.name)}</div>
-        <div class="am-item-sub">${esc(this.d.registry.categoryName(a.packId, a.cat))}${meta ? ` · v${meta.version}` : ''}</div></div>`;
+        <div class="am-item-sub">${esc(this.d.registry.categoryName(a.packId, a.cat))}${meta ? ` · v${esc(meta.version)}` : ''}</div></div>`;
     }).join('');
   }
   private renderDetail(): void {
@@ -194,7 +194,7 @@ export class AssetManagerUI {
     }
     const used = this.d.usageOf(a.id);
     const pack = this.d.registry.pack(a.packId);
-    const head = `<div class="am-preview"><img alt="" src="${this.thumbOf(a)}" /></div>
+    const head = `<div class="am-preview"><img alt="" src="${esc(this.thumbOf(a))}" /></div>
       <div class="am-title">${esc(a.name)}</div><div class="am-id">${esc(a.id)}</div>`;
     const placeBtn = `<button class="act primary" data-d="place">➕ 放置到场景</button>`;
     if (a.source !== 'user') {
@@ -203,18 +203,18 @@ export class AssetManagerUI {
         <dt>分类</dt><dd>${esc(this.d.registry.categoryName(a.packId, a.cat))}</dd>
         <dt>类型</dt><dd>程序化模型${a.animate ? ' · 带动画' : ''}</dd>
         ${a.tags.length ? `<dt>标签</dt><dd>${a.tags.map(esc).join('、')}</dd>` : ''}
-        <dt>场景引用</dt><dd>${used} 个实例</dd></dl>
+        <dt>场景引用</dt><dd>${esc(used)} 个实例</dd></dl>
         <div class="act-grid one">${placeBtn}</div>
         <div class="am-note">内置资产为只读；如需定制，可导入自己的模型作为替代。</div>`;
     } else {
       const m = this.d.lib.meta(a.id)!;
       box.innerHTML = head + this.metaForm(m) + `<dl class="am-dl">
-        <dt>尺寸</dt><dd>${m.stats.size.join(' × ')} m</dd>
-        <dt>面数</dt><dd>${m.stats.triangles.toLocaleString()}（${m.stats.meshes} 网格）</dd>
-        <dt>材质 / 贴图</dt><dd>${m.stats.materials} / ${m.stats.textures}</dd>
-        <dt>源文件</dt><dd>${esc(m.fileName)} · ${formatBytes(m.fileSize)}</dd>
-        <dt>版本</dt><dd>v${m.version} · ${fmtDate(m.updatedAt)}</dd>
-        <dt>场景引用</dt><dd>${used} 个实例</dd></dl>
+        <dt>尺寸</dt><dd>${esc(m.stats.size.join(' × '))} m</dd>
+        <dt>面数</dt><dd>${esc(m.stats.triangles.toLocaleString())}（${esc(m.stats.meshes)} 网格）</dd>
+        <dt>材质 / 贴图</dt><dd>${esc(m.stats.materials)} / ${esc(m.stats.textures)}</dd>
+        <dt>源文件</dt><dd>${esc(m.fileName)} · ${esc(formatBytes(m.fileSize))}</dd>
+        <dt>版本</dt><dd>v${esc(m.version)} · ${esc(fmtDate(m.updatedAt))}</dd>
+        <dt>场景引用</dt><dd>${esc(used)} 个实例</dd></dl>
         ${this.optionsForm(m.import, 'reprocess')}
         <div class="act-grid">${placeBtn}
           <button class="act" data-d="save">💾 保存信息</button>
@@ -258,11 +258,11 @@ export class AssetManagerUI {
     const old = p.replaceId ? this.d.lib.meta(p.replaceId) : undefined;
     const big = Math.max(...stats.size);
     const warn = big > 500 ? '尺寸超过 500 m，源文件单位可能是毫米或厘米' : big < 0.05 ? '尺寸小于 5 cm，请检查源文件单位' : '';
-    box.innerHTML = `<div class="am-preview"><img alt="" src="${thumb}" /></div>
+    box.innerHTML = `<div class="am-preview"><img alt="" src="${esc(thumb)}" /></div>
       <div class="am-title">${old ? `替换版本：${esc(old.name)}` : '导入新模型'}</div>
-      <div class="am-id">${esc(p.file.name)} · ${formatBytes(p.file.size)}</div>
-      <dl class="am-dl"><dt>处理后尺寸</dt><dd>${stats.size.join(' × ')} m</dd>
-        <dt>面数</dt><dd>${stats.triangles.toLocaleString()}（${stats.meshes} 网格，${stats.materials} 材质，${stats.textures} 贴图）</dd></dl>
+      <div class="am-id">${esc(p.file.name)} · ${esc(formatBytes(p.file.size))}</div>
+      <dl class="am-dl"><dt>处理后尺寸</dt><dd>${esc(stats.size.join(' × '))} m</dd>
+        <dt>面数</dt><dd>${esc(stats.triangles.toLocaleString())}（${esc(stats.meshes)} 网格，${esc(stats.materials)} 材质，${esc(stats.textures)} 贴图）</dd></dl>
       ${warn ? `<div class="am-warn">⚠ ${warn}</div>` : ''}
       ${stats.triangles > 500_000 ? '<div class="am-warn">⚠ 面数较高，大量放置会影响性能（阶段 4 将提供自动减面 / LOD）</div>' : ''}
       ${this.optionsForm(p.options, 'import')}

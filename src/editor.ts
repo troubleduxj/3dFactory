@@ -6,7 +6,9 @@ import { AssetRegistry } from './core/registry';
 import { walkComponents } from './core/layout';
 import { optimizeInstance, planStats } from './core/optimize';
 import { renderThumbnail } from './core/thumbs';
+import { esc } from './core/html';
 import { UserAssetLibrary } from './assets/library';
+import { safeThumbnail, validateLayout, validateProjectBundle } from './assets/validate';
 import { IdbAssetStore, MemoryAssetStore, type AssetStore } from './assets/store';
 import { AssetManagerUI } from './assets/manager-ui';
 import { BUILTIN_PACKS } from './packs/index';
@@ -18,7 +20,6 @@ type Obj = THREE.Object3D;
 // 默认按 HTMLInputElement 返回，便于读写 value / disabled / checked（按钮、下拉框同样具有这些属性）
 const $ = <T extends HTMLElement = HTMLInputElement>(id: string): T => document.getElementById(id) as T;
 const $in = (id: string) => $<HTMLInputElement>(id);
-const esc = (s: unknown) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const r3 = (a: number[]) => a.map(v => Math.round(v * 1000) / 1000) as Vec3;
 
 /** ?nomerge：关闭静态合并（用于对比性能 / 排查合并问题） */
@@ -632,7 +633,7 @@ function renderOutliner() {
     if (q && !o.name.toLowerCase().includes(q)) continue;
     const cls = ['ol-row', selection.includes(o) ? 'sel' : '', o.visible ? '' : 'off'].join(' ');
     const n = o.userData.isGroup ? `<span class="ol-sub">${o.children.filter(isEditable).length}</span>` : '';
-    html.push(`<div class="${cls}" data-uid="${o.userData.uid}"><span class="ol-ico">${iconOf(o)}</span><span class="ol-name">${esc(o.name)}</span>${n}` +
+    html.push(`<div class="${cls}" data-uid="${esc(o.userData.uid)}"><span class="ol-ico">${esc(iconOf(o))}</span><span class="ol-name">${esc(o.name)}</span>${n}` +
       `<button class="ol-btn ${o.visible ? '' : 'on'}" data-act="vis" title="显示 / 隐藏">${o.visible ? '👁' : '—'}</button>` +
       `<button class="ol-btn ${o.userData.locked ? 'on' : ''}" data-act="lock" title="锁定 / 解锁">${o.userData.locked ? '🔒' : '🔓'}</button></div>`);
   }
@@ -690,8 +691,8 @@ function renderSinglePanel(o: Obj): void {
   const size = new THREE.Box3().setFromObject(o).getSize(new THREE.Vector3());
   const canColor = !!o.userData.isGroup || !!defOf(o)?.colorable;
   inspBody.innerHTML =
-    `<div class="obj-head"><span class="obj-ico">${iconOf(o)}</span><div class="obj-meta">` +
-    `<input type="text" id="f-name" class="name-in" /><div class="obj-sub">${typeName(o)} · #${o.userData.uid} · 约 ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m</div></div></div>` +
+    `<div class="obj-head"><span class="obj-ico">${esc(iconOf(o))}</span><div class="obj-meta">` +
+    `<input type="text" id="f-name" class="name-in" /><div class="obj-sub">${esc(typeName(o))} · #${esc(o.userData.uid)} · 约 ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m</div></div></div>` +
     (locked ? `<div class="lock-note">🔒 物体已锁定，无法在视口中选取或变换 <button class="mini-btn" data-act="unlock">解锁</button></div>` : '') +
     section('变换', vec3Row('位置 (m)', 'pos', 0.5) + vec3Row('旋转 (°)', 'rot', 15) + vec3Row('缩放', 'scl', 0.1) +
       `<div class="field"><label>等比缩放 <b id="sclVal"></b></label><input type="range" id="f-uni" min="0.1" max="5" step="0.05" /></div>` +
@@ -769,7 +770,7 @@ function renderMultiPanel() {
   const n = selection.length;
   inspBody.innerHTML =
     `<div class="multi-head"><b>${n}</b> 个物体已选中<div class="obj-sub">拖动 gizmo 可整体变换</div></div>` +
-    `<div class="chip-list">${selection.slice(0, 12).map(o => `<span class="chip">${iconOf(o)} ${esc(o.name)}</span>`).join('')}${n > 12 ? `<span class="chip">+${n - 12}</span>` : ''}</div>` +
+    `<div class="chip-list">${selection.slice(0, 12).map(o => `<span class="chip">${esc(iconOf(o))} ${esc(o.name)}</span>`).join('')}${n > 12 ? `<span class="chip">+${n - 12}</span>` : ''}</div>` +
     section('对齐与分布', `<div class="align-grid">
       <span>X 轴</span><button class="mini-btn" data-al="x,min">左</button><button class="mini-btn" data-al="x,center">中</button><button class="mini-btn" data-al="x,max">右</button><button class="mini-btn" data-al="x,dist">均分</button>
       <span>Z 轴</span><button class="mini-btn" data-al="z,min">前</button><button class="mini-btn" data-al="z,center">中</button><button class="mini-btn" data-al="z,max">后</button><button class="mini-btn" data-al="z,dist">均分</button>
@@ -813,7 +814,7 @@ function renderEnvPanel() {
       <div class="field"><label>太阳方位 <b id="v-az"></b></label><input type="range" id="e-az" min="0" max="360" step="1" /></div>
       <div class="field"><label>太阳高度 <b id="v-el"></b></label><input type="range" id="e-el" min="5" max="90" step="1" /></div>
       <div class="toggles"><label><input type="checkbox" id="e-shadow" /> 阴影</label><label><input type="checkbox" id="e-grid" /> 网格</label><label><input type="checkbox" id="e-fog" /> 雾效</label></div>`) +
-    section('统计', `<div class="stats-list">${top.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') || '<div>空场景</div>'}</div>`, true);
+    section('统计', `<div class="stats-list">${top.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('') || '<div>空场景</div>'}</div>`, true);
 
   // 文本 / 数值 / 颜色 / 范围输入绑定 value；复选框绑定 checked
   const bind = (id: string, read: () => string | number | boolean, live: (v: string & boolean) => void) => {
@@ -928,7 +929,7 @@ $('btnFocus').onclick = focusSelection;
 const thumbCache = new Map<string, string>();
 let libPack = 'all';
 function assetThumb(def: AssetDef): string {
-  if (def.thumbnail) return def.thumbnail;
+  if (def.thumbnail) return safeThumbnail(def.thumbnail);
   return thumbCache.get(def.id) ?? '';
 }
 function buildLibrary(): void {
@@ -936,7 +937,7 @@ function buildLibrary(): void {
   const sel = $<HTMLSelectElement>('libPack');
   const packs = registry.packs().filter(p => registry.byPack(p.id).length);
   sel.innerHTML = `<option value="all">全部资产包（${registry.all().length}）</option>` +
-    packs.map(p => `<option value="${p.id}">${esc(p.name)}（${registry.byPack(p.id).length}）</option>`).join('');
+    packs.map(p => `<option value="${esc(p.id)}">${esc(p.name)}（${registry.byPack(p.id).length}）</option>`).join('');
   if (libPack !== 'all' && !packs.some(p => p.id === libPack)) libPack = 'all';
   sel.value = libPack;
   const html: string[] = [];
@@ -951,7 +952,7 @@ function buildLibrary(): void {
         const t = assetThumb(a);
         const search = [a.name, a.id, cat.name, p.name, ...a.tags].join(' ').toLowerCase();
         html.push(`<div class="card" draggable="true" data-id="${esc(a.id)}" data-search="${esc(search)}" title="${esc(a.name)}（点击添加 / 拖拽放置）">` +
-          `<div class="thumb ${t ? 'ready' : ''}"><span class="emoji">${a.icon}</span><img alt="" src="${t}" /></div>` +
+          `<div class="thumb ${t ? 'ready' : ''}"><span class="emoji">${esc(a.icon)}</span><img alt="" src="${esc(t)}" /></div>` +
           `<div class="card-name">${esc(a.name)}</div></div>`);
       }
       html.push('</div></details>');
@@ -1035,7 +1036,7 @@ function loadScene(id: string): void {
 const sceneSelect = $<HTMLSelectElement>('sceneSelect');
 function buildSceneSelect(): void {
   sceneSelect.innerHTML = registry.packs().filter(p => registry.scenes().some(s => s.packId === p.id))
-    .map(p => `<optgroup label="${esc(p.name)}">${registry.scenes().filter(s => s.packId === p.id).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</optgroup>`).join('');
+    .map(p => `<optgroup label="${esc(p.name)}">${registry.scenes().filter(s => s.packId === p.id).map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</optgroup>`).join('');
 }
 sceneSelect.addEventListener('change', () => {
   if (history.index > 0 && !confirm('切换场景会替换当前内容（未保存的修改将丢失），确定吗？')) {
@@ -1085,12 +1086,16 @@ async function exportProject(): Promise<void> {
   toast(bundle.assets.length ? `已导出项目包（含 ${bundle.assets.length} 个自定义模型）` : '已导出项目包', 'ok');
 }
 async function importProjectText(txt: string): Promise<void> {
-  const data = JSON.parse(txt);
-  let layout: LayoutData = data;
+  let data: unknown;
+  try { data = JSON.parse(txt); } catch { throw new Error('文件不是有效的 JSON'); }
+  let layout: LayoutData;
   let added = 0;
-  if (data?.format === 'project') {
-    added = await userLib.unpackAssets((data as ProjectBundle).assets || []);
-    layout = (data as ProjectBundle).layout;
+  if ((data as { format?: unknown } | null)?.format === 'project') {
+    const bundle = validateProjectBundle(data); // 先校验布局，失败时什么都不写
+    layout = bundle.layout;
+    added = await userLib.unpackAssets(bundle.assets); // 任一资产无效 → 整体拒绝，未写库
+  } else {
+    layout = validateLayout(data);
   }
   loadData(layout);
   reportMissing(countMissing(), added ? `已导入（新增 ${added} 个自定义模型）` : '已导入');
